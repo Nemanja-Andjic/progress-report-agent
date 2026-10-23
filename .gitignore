@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Tajne: tokeni, API ključevi, lozinke
+.env
+.env.*
+
+# Lična podešavanja
+.vscode/
+.claude/settings.local.json
+
+# Sistem i logovi
+Thumbs.db
+*.log
