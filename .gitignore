@@ -15,3 +15,6 @@ __pycache__/
 # Sistem i logovi
 Thumbs.db
 *.log
+
+# Lične probe (samo lokalno)
+probe/
