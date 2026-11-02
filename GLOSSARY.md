@@ -52,7 +52,10 @@ Posao kojem stavka pripada, npr. "Distill analiza" ili "Agent za izvještaje". A
 _Izbjegavaj_: repo (jedan projekat može imati više repoa)
 
 **Spisak projekata**:
-Zatvoren spisak imena projekata koji vodi Nemanja.
+Zatvoren spisak imena projekata i njihovih repoa koji vodi Nemanja. Agent čita samo repoe sa ovog spiska.
+
+**Spisak zabranjenih pojmova**:
+Privatan spisak pojmova, npr. imena klijenata, koje izvještaj ne smije da sadrži. Vodi ga Nemanja.
 
 **Dokaz**:
 Link ka nečemu što pokazuje da je stavka urađena, npr. issue, PR ili commit. Uz link ide kratka oznaka, npr. "PR #12". Smije da vodi samo na adrese sa spiska dozvoljenih linkova.
@@ -61,8 +64,24 @@ Link ka nečemu što pokazuje da je stavka urađena, npr. issue, PR ili commit. 
 Zatvoren spisak adresa na koje izvještaj smije da vodi, u dokazima i u detaljima. Vodi ga Nemanja.
 
 **Bilješka sesije**:
-Kratak zapis o jednoj Claude sesiji koji napiše Claude na njenom kraju. Bilješka je ono što agent čita, a sažetak je ono što mentor dobija. Bilješka se nikad ne objavljuje.
+Kratak zapis o jednom dijelu rada u Claude sesiji koji napiše Claude dok sesija još traje, jer sesija nema pravi kraj. Jedna sesija može imati više bilješki. Bilješka je ono što agent čita, a sažetak je ono što mentor dobija. Bilješka se nikad ne objavljuje.
 _Izbjegavaj_: sažetak sesije (sudara se sa pojmom sažetak)
 
 **Arhiva**:
 Spisak svih objavljenih izvještaja po datumima.
+
+**Posljednja aktivnost**:
+Trenutak posljednje poruke ili završenog odgovora u Claude Code razgovoru. To je samo vrijeme, bez ičega iz razgovora.
+
+**Pauza**:
+Vrijeme proteklo od posljednje aktivnosti. Svjež rad na GitHub-u ili nova bilješka sesije odlažu pitanje o završetku, ali ne mijenjaju posljednju aktivnost.
+_Izbjegavaj_: neaktivnost, idle
+
+**Zatvoren dan**:
+Dan za koji je izvještaj objavljen i mentor je dobio poruku. Tog dana nema više pitanja ni slanja, a rad poslije toga ulazi u sljedeći izvještaj.
+
+**Pitanje o završetku**:
+Poruka kojom agent pita Nemanju da li je završio za danas.
+
+**Javljanje o završetku**:
+Nemanjin odgovor da je završio za danas, dugmetom na pitanje o završetku ili porukom "završio" poslatom botu u bilo kom trenutku. Izvještaj zbog njega kreće odmah.
