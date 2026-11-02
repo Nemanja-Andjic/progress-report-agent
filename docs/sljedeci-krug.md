@@ -19,18 +19,24 @@ Veće odluke su u ADR 0004 i 0005. Ovdje su vrijednosti koje se lako mijenjaju:
 - Redoslijed: commit, objava, provjera zaštite, pa poruka mentoru. Ako fajl već postoji, a objava ili slanje nisu uspjeli, fajl se ne piše ponovo.
 - Agent čita samo repoe aktivnih projekata, iz polja `repoi` u `projekti.json`.
 - Hookovi su u `~/.claude/settings.json`, pa rade u svakom folderu. Za novi zadatak se mijenja samo `projekti.json`.
+- Bilješka ulazi u izvještaj samo ako joj je projekat sa spiska aktivnih projekata. Ostale agent preskače, npr. rad u `moj-cms`.
 - ADR 0002 provodi prompt i `--provjeri`: obrasci tajni i putanja i pojmovi iz privatnog `zabranjeni-pojmovi.json`. Bilješka sa pogotkom ne ide Groku.
 - Jutarnja provjera u Actions pita Worker da li je juče završeno. Ako nije, ili Worker ne odgovara, Nemanja dobija poruku.
 
-## Tehnički izbori koje treba potvrditi
+## Potvrđeni tehnički izbori
 
-- Stanje Workera je u D1, da dvostruki pritisak i 23:00 ne pošalju izvještaj dva puta. Besplatna ograničenja D1 još nisu provjerena.
+- Stanje Workera je u D1, da dvostruki pritisak i 23:00 ne pošalju izvještaj dva puta. Besplatan plan daje 5 miliona pročitanih i 100.000 upisanih redova dnevno i 5 GB prostora, što je dovoljno.
 - Kod Workera i agenta je u javnom repou. Workflow u privatnom repou uzima kod iz javnog, a tajne su samo u GitHub Secrets privatnog repoa i na Workeru.
 - Worker daje datum workflow-u, da kašnjenje Actions-a ne promijeni datum izvještaja.
 - Isti workflow radi commit i objavu, jer commit sa `GITHUB_TOKEN` ne pokreće `objava.yml`. `testovi.yml` takođe ignoriše `biljeske-sesija/**`.
 - Dugme sa pitanja važi samo za dan kad je pitanje poslato. Poruka "završio" poslije ponoći važi za novi dan.
 - Prvi pravi izvještaj u istom commitu briše oba probna, a period mu je posljednja 24 sata, ne od probnog izvještaja.
 - Rad kraći od 30 minuta, bez commita, može proći bez bilješke. To se prihvata dok se ne pokaže kao problem.
+
+## Za spec i tickete
+
+- Rizik za spec: nije potvrđeno da hook na kraju odgovora može natjerati Claude-a da napiše bilješku. To je viđeno samo posredno, u dokumentaciji za `SubagentStop`. Ticket za taj hook počinje kratkom probom.
+- #16 ostaje otvoren. Zatvara se zajedno sa specom #5, kad prvi pravi izvještaj stigne mentoru i on se prijavi na sajt.
 
 ## Stanje prije planiranja
 

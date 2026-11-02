@@ -64,7 +64,7 @@ Link ka nečemu što pokazuje da je stavka urađena, npr. issue, PR ili commit. 
 Zatvoren spisak adresa na koje izvještaj smije da vodi, u dokazima i u detaljima. Vodi ga Nemanja.
 
 **Bilješka sesije**:
-Kratak zapis o jednom dijelu rada u Claude sesiji koji napiše Claude dok sesija još traje, jer sesija nema pravi kraj. Jedna sesija može imati više bilješki. Bilješka je ono što agent čita, a sažetak je ono što mentor dobija. Bilješka se nikad ne objavljuje.
+Kratak zapis o jednom dijelu rada u Claude sesiji koji napiše Claude dok sesija još traje, jer sesija nema pravi kraj. Jedna sesija može imati više bilješki. Ulazi u izvještaj samo ako joj je projekat aktivan. Bilješka je ono što agent čita, a sažetak je ono što mentor dobija. Bilješka se nikad ne objavljuje.
 _Izbjegavaj_: sažetak sesije (sudara se sa pojmom sažetak)
 
 **Arhiva**:
