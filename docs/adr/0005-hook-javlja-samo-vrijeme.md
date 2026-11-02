@@ -9,3 +9,4 @@ Hook za posljednju aktivnost i hook za bilješke su u globalnim podešavanjima (
 ## Posljedice
 
 - Rad u folderu koji nema veze sa projektima takođe pomjera posljednju aktivnost i može da napravi bilješku. Takva bilješka ne ulazi u izvještaj, jer joj projekat nije sa spiska aktivnih projekata.
+- Hook se Workeru predstavlja posebnim ključem koji može samo da javi aktivnost. Ključ je samo na Nemanjinom računaru, van svih repoa, a Worker odbija svaki zahtjev bez njega.

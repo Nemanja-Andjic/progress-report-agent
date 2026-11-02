@@ -2,7 +2,7 @@
 
 ## Odluke iz planiranja drugog kruga
 
-Veće odluke su u ADR 0004 i 0005. Ovdje su vrijednosti koje se lako mijenjaju:
+Veće odluke su u ADR 0004, 0005 i 0006. Ovdje su vrijednosti koje se lako mijenjaju:
 
 - Pitanje o završetku kreće poslije 60 minuta pauze.
 - Agent smije sam da pita između 16:00 i 22:30.

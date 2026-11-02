@@ -78,7 +78,7 @@ Vrijeme proteklo od posljednje aktivnosti. Svjež rad na GitHub-u ili nova bilje
 _Izbjegavaj_: neaktivnost, idle
 
 **Zatvoren dan**:
-Dan za koji je izvještaj objavljen i mentor je dobio poruku. Tog dana nema više pitanja ni slanja, a rad poslije toga ulazi u sljedeći izvještaj.
+Dan za koji je izvještaj objavljen i mentor je dobio poruku. Zatvoren je i dan bez rada, kad je mentor dobio "Danas nema zabilježenog rada". Tog dana nema više pitanja ni slanja, a rad poslije toga ulazi u sljedeći izvještaj.
 
 **Pitanje o završetku**:
 Poruka kojom agent pita Nemanju da li je završio za danas.

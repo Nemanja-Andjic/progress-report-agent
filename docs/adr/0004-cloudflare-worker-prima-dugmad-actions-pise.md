@@ -10,3 +10,4 @@ Sve u Actions bi bilo jednostavnije, ali GitHub cron nije dovoljno tačan: `prov
 - Dok je webhook uključen, `getUpdates` ne radi za tog bota.
 - Cron okidači Workera rade po UTC-u, pa Worker sam računa lokalno vrijeme, da prelazak na ljetnje ili zimsko vrijeme ne pomjeri 23:00.
 - Worker je na posebnom besplatnom Cloudflare nalogu, a ne na nalogu sa sajtom. Token za objavu sajta može da izmijeni svaki Worker na svom nalogu (ADR 0003), a ovaj Worker drži Telegram token i GitHub token.
+- GitHub token na Workeru je fine-grained, samo za privatni repo i samo za pokretanje workflow-a (Actions: write), ništa više.
