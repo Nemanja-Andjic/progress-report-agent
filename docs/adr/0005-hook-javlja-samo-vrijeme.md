@@ -9,4 +9,5 @@ Hook za posljednju aktivnost i hook za bilješke su u globalnim podešavanjima (
 ## Posljedice
 
 - Rad u folderu koji nema veze sa projektima takođe pomjera posljednju aktivnost i može da napravi bilješku. Takva bilješka ne ulazi u izvještaj, jer joj projekat nije sa spiska aktivnih projekata.
+- GitHub i bilješke gleda kratak workflow u GitHub Actions, a ne Worker, jer GitHub token na Workeru može samo da pokreće workflow-e (ADR 0004). Worker ga pokrene kad pauza istekne, a workflow mu javi da li da pita. Svaka provjera troši oko minut Actions i kasni koliko i pokretanje workflow-a.
 - Hook se Workeru predstavlja posebnim ključem koji može samo da javi aktivnost. Ključ je samo na Nemanjinom računaru, van svih repoa, a Worker odbija svaki zahtjev bez njega.
