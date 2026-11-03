@@ -2,7 +2,7 @@
 
 Tekst ispod ide u uputstvo Claude projekta "Rad sa Tarikom" na claude.ai. Unos i pristup za pisanje u privatni repo su ručni koraci iz #31.
 
-Na claude.ai nema hooka ni provjere prije commita, pa je ovo uputstvo jedina zaštita prije upisa. Agent kasnije svaku bilješku ponovo provjerava prije nego što je pošalje Groku.
+Na claude.ai nema hooka. Provjera prije commita postoji samo kad Claude ima alate i privatni repo, a inače je ovo uputstvo jedina zaštita prije upisa. Agent kasnije svaku bilješku ponovo provjerava prije nego što je pošalje Groku.
 
 ## Tekst uputstva
 
@@ -30,6 +30,10 @@ Bilješka ostaje zauvijek u git istoriji, pa nikad ne smije da sadrži:
 - privatne poruke;
 - imena klijenata;
 - interne materijale Tarikove firme.
+
+Ako imaš alate i privatni repo (kao u projektu "Rad sa Tarikom"), prije commita u korijenu privatnog repoa pokreni:
+python napravi_sajt.py --provjeri-biljesku <fajl>
+Bilješku koja ne prođe provjeru ne commit-uj.
 
 Ako nisi siguran da nešto smije u bilješku, izostavi to. Commit poruka je samo "Bilješka sesije". Kad završiš, javi jednom rečenicom da je bilješka upisana, a tekst nemoj prepisivati u odgovor.
 ```

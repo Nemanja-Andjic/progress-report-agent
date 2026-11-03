@@ -34,7 +34,7 @@ U `~/.claude/settings.json` dodaj donji dio, sa stvarnom putanjom do ovog repoa.
 ```json
 {
   "permissions": {
-    "allow": ["Bash(py -3 *biljeska.py* upisi*)"]
+    "allow": ["Bash(py -3 \"PUTANJA/hookovi/biljeska.py\" upisi *)"]
   },
   "hooks": {
     "UserPromptSubmit": [
