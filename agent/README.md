@@ -40,18 +40,19 @@ Groku idu samo bilješke iz `biljeske-sesija/` koje ispunjavaju sve uslove:
 - vrijeme je u periodu, od početka uključivo do kraja isključivo. Kraj je zaokružen naniže na minut, kao i vrijeme bilješke, pa bilješka iz tog minuta ide u sljedeći izvještaj;
 - prošla je `napravi_sajt.py --provjeri-biljesku`. Inače dodaje upozorenje.
 
-Sa GitHub-a idu issue-i, PR-ovi i commitovi iz polja `repoi` aktivnih projekata:
+Sa GitHub-a idu issue-i, PR-ovi i commitovi iz polja `repoi` aktivnih projekata, i to samo oni čiji je autor nalog `Nemanja-Andjic` (`NALOG_NA_GITHUBU` u `agent.py`). Tuđi i od botova se preskaču bez upozorenja. Commit se računa po nalogu koji mu GitHub dodijeli preko emaila, pa se commit sa emailom koji nije vezan za nalog takođe preskače.
 
 - issue i PR ulaze ako su mijenjani u periodu (`updated_at`), a čita se naslov, opis i stanje. Komentari se ne čitaju;
 - commit ulazi ako mu je vrijeme commit-ovanja u periodu, sa bilo koje grane. Isti commit na više grana ulazi jednom;
 - opis i poruka commita se skraćuju na 2000 znakova, ali tek poslije provjere, da presječena tajna ne prođe kao običan tekst.
 
-Kao rad se **ne računaju** commitovi čiji je autor `progress-report-agent` i commitovi koji mijenjaju samo `biljeske-sesija/`. Inače bi agentov izvještaj ili bilješka sami pravili rad, pa dan bez rada ne bi mogao da se desi, a sljedeći izvještaj bi opisivao prethodni. Commit koji mijenja i `biljeske-sesija/` i nešto drugo računa se kao rad, a bilješke i dalje ulaze preko svog foldera.
+Kao rad se **ne računaju** ni commitovi čije je ime autora `progress-report-agent` i commitovi koji mijenjaju samo `biljeske-sesija/`. Inače bi agentov izvještaj ili bilješka sami pravili rad, pa dan bez rada ne bi mogao da se desi, a sljedeći izvještaj bi opisivao prethodni. Commit koji mijenja i `biljeske-sesija/` i nešto drugo računa se kao rad, a bilješke i dalje ulaze preko svog foldera.
 
-Podaci sa GitHub-a se provjeravaju jednim pozivom `napravi_sajt.py --provjeri`, nad privremenim fajlom van repoa u kom je svaki podatak jedna stavka. Agent čita poruke po obliku `stavke[N].polje vrsta`:
+Podaci sa GitHub-a se provjeravaju jednim pozivom `napravi_sajt.py --provjeri`, nad privremenim fajlom van repoa u kom je svaki podatak dvije stavke: naslov sa dokazom i tekst. Agent čita poruke po obliku `stavke[N].polje vrsta`. Svaki nalaz dodaje upozorenje bez vrijednosti:
 
-- podatak sa pogotkom po ADR 0002 ne ide Groku i dodaje upozorenje;
-- podatak čiji link nije na spisku dozvoljenih linkova ide Groku bez dokaza i dodaje upozorenje;
+- pogodak po ADR 0002 u naslovu: podatak ne ide Groku;
+- pogodak u tekstu (opis issue-a ili PR-a, ostatak poruke commita): Groku ide podatak bez teksta, npr. kad uputstvo pominje `~/.claude/settings.json`;
+- pogodak u linku, ili link koji nije na spisku dozvoljenih linkova: Groku ide podatak bez dokaza;
 - poruka drugog oblika znači da provjera nije radila, pa je ishod `neuspjeh`.
 
 Ako je bar nešto odbijeno, a ništa nije prošlo, ishod je `neuspjeh`, a ne `dan-bez-rada`. Rad možda postoji, a mentor ne smije da dobije "nema rada" za takav dan (ADR 0006). Isto važi i za bilješku iz koje se ne vidi vrijeme ili projekat. Ona pravi upozorenje na svakom pisanju i ruši dan bez drugog ulaza, dok je Nemanja ne ispravi ili ukloni.
@@ -96,7 +97,7 @@ Komanda je za provjeru prije pitanja (#29). Ne zove Groka, a na stdout ispiše j
 | `nema-svjezeg-rada` | u tekućem periodu nema rada | |
 | `neuspjeh` | ne zna se da li ima rada, pa pitanje ne smije da krene | `razlog` |
 
-I ovdje uvijek postoji polje `upozorenja`. Period i pravila su isti kao za pisanje, pa treba puna git istorija, a commit agenta i commit samo sa bilješkama se ne računaju. Razlike su dvije:
+I ovdje uvijek postoji polje `upozorenja`. Period i pravila su isti kao za pisanje, pa treba puna git istorija, a tuđ rad, commit agenta i commit samo sa bilješkama se ne računaju. Razlike su dvije:
 
 - kraj perioda je tačan trenutak, a ne zaokružen na minut, jer se traži baš rad iz ovog minuta;
 - provjera iz ADR 0002 se ne zove. Podatak sa pogotkom ne ide nikud, a rad je bio, pa se njegovo vrijeme računa.

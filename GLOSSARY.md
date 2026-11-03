@@ -78,7 +78,7 @@ Vrijeme proteklo od posljednje aktivnosti. Svjež rad na GitHub-u ili nova bilje
 _Izbjegavaj_: neaktivnost, idle
 
 **Svjež rad**:
-Rad na GitHub-u ili bilješka sesije u tekućem periodu izvještaja, iz repoa i projekata sa spiska aktivnih. Ne računaju se commitovi agenta ni commitovi koji mijenjaju samo folder bilješki, a bilješka se računa preko svog foldera i svog vremena.
+Nemanjin rad na GitHub-u ili bilješka sesije u tekućem periodu izvještaja, iz repoa i projekata sa spiska aktivnih. Ne računaju se tuđi rad, rad botova, commitovi agenta ni commitovi koji mijenjaju samo folder bilješki, a bilješka se računa preko svog foldera i svog vremena.
 
 **Zatvoren dan**:
 Dan za koji je izvještaj objavljen i mentor je dobio poruku. Zatvoren je i dan bez rada, kad je mentor dobio "Danas nema zabilježenog rada". Tog dana nema više pitanja ni slanja, a rad poslije toga ulazi u sljedeći izvještaj.

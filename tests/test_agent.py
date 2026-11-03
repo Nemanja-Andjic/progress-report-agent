@@ -26,6 +26,9 @@ DATUM = "2030-05-15"
 ADRESA_SAJTA = "https://sajt.example.com"
 KLJUC = "lazni-kljuc-za-test"
 TOKEN_GITHUBA = "lazni-token-githuba-za-test"
+NALOG = "Nemanja-Andjic"
+TUDJI_NALOG = "neko-drugi"
+BOT = "dependabot[bot]"
 REPO = "neko/repo"
 DRUGI_REPO = "neko/drugi-repo"
 NEAKTIVAN_REPO = "neko/neaktivan-repo"
@@ -187,6 +190,7 @@ class LazniGithub:
                 "title": naslov,
                 "body": tekst,
                 "state": "open",
+                "user": {"login": NALOG},
                 "updated_at": vrijeme_githuba(prije),
                 "html_url": f"https://github.com/{repo}/{putanja}/{self.broj}",
                 **ostalo,
@@ -212,6 +216,7 @@ class LazniGithub:
             {
                 "sha": sha,
                 "html_url": f"https://github.com/{repo}/commit/{sha}",
+                "author": {"login": NALOG},
                 "commit": {
                     "message": poruka,
                     "author": {"name": autor},
@@ -1044,14 +1049,15 @@ def test_link_na_drugu_adresu_ne_dobija_token(repo, grok, github):
     assert grok.zahtjevi == []
 
 
-def test_dugacak_tekst_se_skracuje_a_pogodak_na_kraju_ga_ipak_odbija(repo, grok, github):
-    github.issue(naslov="Dugačak", tekst="a" * 5000)
+def test_dugacak_tekst_se_skracuje_a_pogodak_na_kraju_ga_ipak_izostavlja(repo, grok, github):
+    github.issue(prije=timedelta(hours=3), naslov="Dugačak", tekst="a" * 5000)
     github.issue(naslov="Dugačak sa pogotkom", tekst="a" * 5000 + POGODAK)
 
     izlaz = repo.pisi()
 
-    assert [podatak["naslov"] for podatak in grok.github()] == ["Dugačak"]
-    assert len(grok.github()[0]["tekst"]) == 2000
+    dugacak, sa_pogotkom = grok.github()
+    assert len(dugacak["tekst"]) == 2000
+    assert "tekst" not in sa_pogotkom
     assert len(izlaz["upozorenja"]) == 1
 
 
@@ -1066,14 +1072,15 @@ def test_issue_bez_opisa_ide_groku(repo, grok, github):
     "dodaj",
     [
         lambda github: github.issue(naslov=f"Naslov sa {POGODAK}"),
-        lambda github: github.issue(tekst=f"Tekst sa {POGODAK}"),
-        lambda github: github.pr(tekst=f"Tekst sa {POGODAK}"),
-        lambda github: github.commit(poruka=f"Naslov\n\nTijelo sa {POGODAK}"),
-        lambda github: github.issue(html_url=f"{DOZVOLJEN_LINK}repo/issues/{POGODAK}"),
+        lambda github: github.pr(naslov=f"Naslov sa {POGODAK}"),
+        lambda github: github.commit(poruka=f"Naslov sa {POGODAK}"),
+        lambda github: github.issue(naslov=f"Naslov sa {POGODAK}", tekst=f"Tekst sa {POGODAK}"),
     ],
-    ids=["naslov-issue-a", "tekst-issue-a", "tekst-pr-a", "poruka-commita", "link"],
+    ids=["issue", "pr", "commit", "i-tekst"],
 )
-def test_podatak_sa_pogotkom_ne_ide_groku_a_upozorenje_nema_vrijednost(repo, grok, github, dodaj):
+def test_podatak_sa_pogotkom_u_naslovu_ne_ide_groku_a_upozorenje_nema_vrijednost(
+    repo, grok, github, dodaj
+):
     github.issue(naslov="Dobar issue", prije=timedelta(hours=3))
     dodaj(github)
 
@@ -1086,6 +1093,62 @@ def test_podatak_sa_pogotkom_ne_ide_groku_a_upozorenje_nema_vrijednost(repo, gro
     assert len(izlaz["upozorenja"]) == 1
     assert izlaz["upozorenja"][0].startswith(f"{REPO} ")
     assert "zabranjen pojam" in izlaz["upozorenja"][0]
+    assert POGODAK not in rezultat.stdout + rezultat.stderr
+
+
+@pytest.mark.parametrize(
+    "dodaj",
+    [
+        lambda github: github.issue(naslov="Pogođen", tekst=f"Tekst sa {POGODAK}"),
+        lambda github: github.pr(naslov="Pogođen", tekst=f"Tekst sa {POGODAK}"),
+        lambda github: github.commit(poruka=f"Pogođen\n\nTijelo sa {POGODAK}"),
+    ],
+    ids=["issue", "pr", "commit"],
+)
+def test_pogodak_u_tekstu_izostavlja_samo_tekst(repo, grok, github, dodaj):
+    github.issue(prije=timedelta(hours=3), naslov="Stariji", tekst="Tekst starijeg.")
+    dodaj(github)
+    github.issue(prije=timedelta(hours=1), naslov="Noviji", tekst="Tekst novijeg.")
+
+    rezultat = repo.pokreni("pisi", "--datum", DATUM, "--repo", str(repo.putanja))
+    izlaz = json.loads(rezultat.stdout)
+
+    assert izlaz["ishod"] == "novi-fajl"
+    assert POGODAK not in grok.poslato()
+    stariji, pogodjen, noviji = grok.github()
+    assert stariji["tekst"] == "Tekst starijeg."
+    assert noviji["tekst"] == "Tekst novijeg."
+    assert pogodjen["naslov"] == "Pogođen"
+    assert "tekst" not in pogodjen
+    assert pogodjen["dokaz"] == "D2"
+    assert len(grok.ulaz()["dokazi"]) == 3
+    assert len(izlaz["upozorenja"]) == 1
+    assert izlaz["upozorenja"][0].startswith(f"{REPO} ")
+    assert "tekst ima zabranjen pojam" in izlaz["upozorenja"][0]
+    assert "izostavljen" in izlaz["upozorenja"][0]
+    assert POGODAK not in rezultat.stdout + rezultat.stderr
+
+
+def test_podatak_sa_pogotkom_samo_u_tekstu_je_izvjestaj_a_ne_neuspjeh(repo, grok, github):
+    github.issue(tekst=f"Tekst sa {POGODAK}")
+
+    assert repo.pisi()["ishod"] == "novi-fajl"
+    assert len(grok.github()) == 1
+
+
+def test_pogodak_u_linku_izostavlja_samo_dokaz(repo, grok, github):
+    github.issue(naslov="Sa pogotkom u linku", html_url=f"{DOZVOLJEN_LINK}repo/issues/{POGODAK}")
+
+    rezultat = repo.pokreni("pisi", "--datum", DATUM, "--repo", str(repo.putanja))
+    izlaz = json.loads(rezultat.stdout)
+
+    assert izlaz["ishod"] == "novi-fajl"
+    assert grok.github()[0]["naslov"] == "Sa pogotkom u linku"
+    assert grok.github()[0]["tekst"] == "Tekst."
+    assert "dokaz" not in grok.github()[0]
+    assert grok.ulaz()["dokazi"] == []
+    assert POGODAK not in grok.poslato()
+    assert "link ima zabranjen pojam" in izlaz["upozorenja"][0]
     assert POGODAK not in rezultat.stdout + rezultat.stderr
 
 
@@ -1280,7 +1343,47 @@ def test_postojeci_fajl_ne_cita_github(repo, github):
     assert github.trazeno == []
 
 
+TUDJ_RAD = [
+    lambda github: github.issue(user={"login": TUDJI_NALOG}),
+    lambda github: github.issue(user={"login": BOT}),
+    lambda github: github.issue(user=None),
+    lambda github: github.pr(user={"login": TUDJI_NALOG}),
+    lambda github: github.pr(user={"login": BOT}, spojen=True),
+]
+IMENA_TUDJEG_RADA = ["tudji-issue", "issue-bota", "issue-bez-autora", "tudji-pr", "pr-bota"]
+
+
+@pytest.mark.parametrize("dodaj", TUDJ_RAD, ids=IMENA_TUDJEG_RADA)
+def test_tudj_issue_i_pr_ne_ulaze_i_ne_prave_dan(repo, grok, github, dodaj):
+    dodaj(github)
+
+    assert repo.pisi() == {"ishod": "dan-bez-rada", "upozorenja": []}
+    assert grok.zahtjevi == []
+
+
+@pytest.mark.parametrize("dodaj", TUDJ_RAD, ids=IMENA_TUDJEG_RADA)
+def test_svjez_rad_ne_broji_tudj_issue_i_pr(repo, github, dodaj):
+    dodaj(github)
+
+    assert repo.svjez_rad() == {"ishod": "nema-svjezeg-rada", "upozorenja": []}
+
+
+def test_tudj_rad_se_preskace_a_moj_ulazi(repo, grok, github):
+    github.issue(naslov="Tuđ issue", user={"login": TUDJI_NALOG})
+    github.commit(poruka="Commit bota", author={"login": BOT})
+    github.issue(naslov="Moj issue")
+    github.commit(poruka="Moj commit")
+
+    assert repo.pisi()["upozorenja"] == []
+    assert sorted(podatak["naslov"] for podatak in grok.github()) == ["Moj commit", "Moj issue"]
+    assert "Tuđ" not in grok.poslato()
+    assert "bota" not in grok.poslato()
+
+
 NISU_RAD = {
+    "tudji-commit": {"author": {"login": TUDJI_NALOG}},
+    "commit-bota": {"author": {"login": BOT}},
+    "commit-bez-naloga": {"author": None},
     "commit-agenta": {"autor": AGENT},
     "commit-agenta-sa-kodom": {"autor": AGENT, "fajlovi": ("izvjestaji/2030-05-15.json", "kod.py")},
     "samo-biljeske": {"fajlovi": ("biljeske-sesija/a.json", "biljeske-sesija/b.json")},

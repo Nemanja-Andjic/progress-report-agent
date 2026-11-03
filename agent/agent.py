@@ -46,6 +46,8 @@ PAUZA_GROKA = float(os.environ.get("XAI_PAUZA", 15))
 ROK_GROKA = 180
 
 ADRESA_GITHUB = os.environ.get("AGENT_GITHUB_ADRESA", "https://api.github.com")
+# Računa se samo rad ovog naloga, pa ni tuđ issue ni bot ne mogu da naprave izvještaj.
+NALOG_NA_GITHUBU = "Nemanja-Andjic"
 PAUZA_GITHUBA = float(os.environ.get("AGENT_GITHUB_PAUZA", 5))
 ROK_GITHUBA = 30
 # Isto ograničenje kao za bilješku, da jedan dugačak opis ne pojede poziv Groka.
@@ -67,8 +69,8 @@ Svaka stavka je jedna urađena stvar:
 - projekat: tačno ime sa spiska aktivnih projekata;
 - dokazi: ID-evi sa spiska dokaza koji pokazuju baš tu stavku, a prazan spisak ako takvih nema.
 
-Podatak sa GitHub-a nosi ID svog dokaza u polju dokaz, ako ga ima. PR sa stanjem closed nije \
-spojen, pa ga ne opisuj kao urađen posao.
+Podatak sa GitHub-a nosi ID svog dokaza u polju dokaz, ako ga ima. Podatak bez polja tekst opiši \
+samo iz naslova. PR sa stanjem closed nije spojen, pa ga ne opisuj kao urađen posao.
 
 Spoji bilješke i podatke o istom poslu u jednu stavku. Piši samo ono što piše u ulazu i ništa ne \
 izmišljaj.
@@ -319,12 +321,17 @@ def tekst_za_upit(vrijeme: datetime) -> str:
     return vrijeme.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def nemanjin_nalog(osoba: dict | None) -> bool:
+    # Commit koji GitHub nije vezao za nalog ovdje ima prazno polje, pa se ne računa.
+    return bool(osoba) and osoba["login"] == NALOG_NA_GITHUBU
+
+
 def issue_i_pr(repo: str, od: datetime, do: datetime, token: str) -> Iterator[dict]:
-    """Issue-i i PR-ovi koji su mijenjani u periodu. GitHub ih vraća na istoj adresi."""
+    """Nemanjini issue-i i PR-ovi koji su mijenjani u periodu. GitHub ih vraća na istoj adresi."""
     parametri = {"state": "all", "since": tekst_za_upit(od)}
     for issue in spisak_sa_githuba(repo, "issues", parametri, token):
         vrijeme = vrijeme_sa_githuba(issue["updated_at"])
-        if not od <= vrijeme < do:
+        if not od <= vrijeme < do or not nemanjin_nalog(issue["user"]):
             continue
         pull_request = issue.get("pull_request")
         vrsta = "PR" if pull_request else "Issue"
@@ -354,10 +361,11 @@ def mijenja_samo_biljeske(repo: str, sha: str, token: str) -> bool:
 
 
 def commitovi(repo: str, od: datetime, do: datetime, token: str) -> Iterator[dict]:
-    """Commitovi iz perioda sa svih grana, bez onih koji nisu rad.
+    """Nemanjini commitovi iz perioda sa svih grana, bez onih koji nisu rad.
 
     Agentov izvještaj i bilješka bi inače sami pravili rad, pa dan bez rada ne bi mogao da se
-    desi, a sljedeći izvještaj bi opisivao prethodni. Bilješke ulaze preko svog foldera.
+    desi, a sljedeći izvještaj bi opisivao prethodni. Bilješke ulaze preko svog foldera. Ime agenta
+    se gleda posebno, jer njegov commit može da nosi email vezan za njegov nalog.
     """
     vidjeni = set()
     for grana in spisak_sa_githuba(repo, "branches", {}, token):
@@ -368,6 +376,8 @@ def commitovi(repo: str, od: datetime, do: datetime, token: str) -> Iterator[dic
             vidjeni.add(commit["sha"])
             vrijeme = vrijeme_sa_githuba(commit["commit"]["committer"]["date"])
             if not od <= vrijeme < do or commit["commit"]["author"]["name"] == IME_AGENTA:
+                continue
+            if not nemanjin_nalog(commit["author"]):
                 continue
             if mijenja_samo_biljeske(repo, commit["sha"], token):
                 continue
@@ -403,25 +413,29 @@ def rad_na_githubu(aktivni: dict[str, list[str]], od: datetime, do: datetime) ->
 
 def nalazi_provjere(
     koren: Path, podaci: list[dict], od: datetime, do: datetime
-) -> tuple[dict[int, str], set[int]]:
-    """Pita provjeru za sve podatke odjednom. Vraća pogotke po podatku i podatke sa lošim linkom.
+) -> dict[int, dict[str, str]]:
+    """Pita provjeru za sve podatke odjednom. Vraća vrstu nalaza po podatku i dijelu podatka.
 
-    Provjera poznaje samo izvještaj, pa je svaki podatak jedna stavka privremenog fajla. Tekst je u
-    kratkom opisu, jer se linkovi u tekstu tamo ne broje. Fajl je van repoa, da sirovi podaci ne
-    mogu da završe u commitu.
+    Provjera poznaje samo izvještaj, pa je svaki podatak dvije stavke privremenog fajla: naslov sa
+    dokazom i tekst. Tako poruka kaže koji dio je pogođen. Oba su u kratkom opisu, jer se linkovi u
+    tekstu tamo ne broje. Fajl je van repoa, da sirovi podaci ne mogu da završe u commitu.
     """
     privremeni = {
         "verzija_formata": 1,
         "datum": do.astimezone(ZONA).date().isoformat(),
         "period": {"od": zapisi_vrijeme(od), "do": zapisi_vrijeme(do)},
-        "broj_stavki": len(podaci),
+        "broj_stavki": len(podaci) * 2,
         "stavke": [
-            {
-                "kratak_opis": f"{podatak['naslov']}\n{podatak['tekst']}",
-                "detalj": "",
-                "dokazi": [{"oznaka": podatak["oznaka"], "link": podatak["link"]}],
-            }
+            stavka
             for podatak in podaci
+            for stavka in (
+                {
+                    "kratak_opis": podatak["naslov"],
+                    "detalj": "",
+                    "dokazi": [{"oznaka": podatak["oznaka"], "link": podatak["link"]}],
+                },
+                {"kratak_opis": podatak["tekst"], "detalj": ""},
+            )
         ],
     }
     with tempfile.TemporaryDirectory() as folder:
@@ -430,18 +444,21 @@ def nalazi_provjere(
         fajl = putanja.as_posix()
         poruke = provjeri(koren, "--provjeri", fajl)
 
-    pogoci: dict[int, str] = {}
-    lose_veze = set()
+    nalazi: dict[int, dict[str, str]] = {}
     for poruka_provjere in poruke:
         nalaz = re.fullmatch(r"stavke\[(\d+)\]\.(\S+) (.+)", poruka_provjere[len(fajl) + 2 :])
-        if not nalaz or int(nalaz[1]) >= len(podaci):
+        indeks, je_tekst = divmod(int(nalaz[1]), 2) if nalaz else (len(podaci), 0)
+        if indeks >= len(podaci):
             # Poruka koja nije o jednom podatku znači da provjera nije radila.
             raise Neuspjeh("Provjera nije mogla da se završi.")
-        if nalaz[2] == "dokazi[0].link" and nalaz[3].startswith("nije na spisku"):
-            lose_veze.add(int(nalaz[1]))
+        if nalaz[2] == "kratak_opis":
+            dio = "tekst" if je_tekst else "naslov"
+        elif not je_tekst and nalaz[2] in ("dokazi[0].link", "dokazi[0].oznaka"):
+            dio = "link"
         else:
-            pogoci.setdefault(int(nalaz[1]), nalaz[3])
-    return pogoci, lose_veze
+            raise Neuspjeh("Provjera nije mogla da se završi.")
+        nalazi.setdefault(indeks, {}).setdefault(dio, nalaz[3])
+    return nalazi
 
 
 def github_za_groka(
@@ -450,26 +467,30 @@ def github_za_groka(
     """Podaci koji smiju Groku, sa dokazima po ID-u. Grok dobija ID i oznaku, a nikad link."""
     if not podaci:
         return [], {}
-    pogoci, lose_veze = nalazi_provjere(koren, podaci, od, do)
+    nalazi = nalazi_provjere(koren, podaci, od, do)
     za_groka = []
     dokazi: dict[str, dict] = {}
     for indeks, podatak in enumerate(podaci):
         ime = f"{podatak['repo']} {podatak['oznaka']}"
-        if indeks in pogoci:
-            upozorenja.append(f"{ime}: {pogoci[indeks]} i ne ide Groku")
+        nalaz = nalazi.get(indeks, {})
+        if "naslov" in nalaz:
+            upozorenja.append(f"{ime}: naslov {nalaz['naslov']}, pa podatak ne ide Groku")
             continue
         stavka = {
             "vrsta": podatak["vrsta"],
             "projekat": podatak["projekat"],
             "vrijeme": zapisi_vrijeme(podatak["vrijeme"]),
             "naslov": podatak["naslov"],
-            # Skraćuje se tek poslije provjere, da presječena tajna ne prođe kao običan tekst.
-            "tekst": podatak["tekst"][:MAKS_TEKSTA_SA_GITHUBA],
         }
+        if "tekst" in nalaz:
+            upozorenja.append(f"{ime}: tekst {nalaz['tekst']}, pa je izostavljen")
+        else:
+            # Skraćuje se tek poslije provjere, da presječena tajna ne prođe kao običan tekst.
+            stavka["tekst"] = podatak["tekst"][:MAKS_TEKSTA_SA_GITHUBA]
         if "stanje" in podatak:
             stavka["stanje"] = podatak["stanje"]
-        if indeks in lose_veze:
-            upozorenja.append(f"{ime}: link nije na spisku dozvoljenih, pa nije dokaz")
+        if "link" in nalaz:
+            upozorenja.append(f"{ime}: link {nalaz['link']}, pa nije dokaz")
         else:
             id_dokaza = f"D{len(dokazi) + 1}"
             dokazi[id_dokaza] = {"oznaka": podatak["oznaka"], "link": podatak["link"]}
