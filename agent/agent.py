@@ -91,6 +91,12 @@ def procitaj_vrijeme(vrijednost) -> datetime | None:
     return vrijeme if vrijeme.utcoffset() is not None else None
 
 
+def sada() -> datetime:
+    # AGENT_SADA postoji samo za testove prelaska na ljetnje i zimsko vrijeme.
+    zadato = os.environ.get("AGENT_SADA")
+    return datetime.fromisoformat(zadato) if zadato else datetime.now(UTC)
+
+
 def zapisi_vrijeme(vrijeme: datetime) -> str:
     return vrijeme.astimezone(ZONA).isoformat(timespec="minutes")
 
@@ -257,7 +263,7 @@ def sema_odgovora(aktivni: list[str]) -> dict:
 
 def pozovi_groka(telo: bytes, kljuc: str) -> bytes:
     zahtjev = urllib.request.Request(
-        f"{ADRESA_XAI}/chat/completions",
+        f"{ADRESA_XAI}/responses",
         data=telo,
         headers={
             "Authorization": f"Bearer {kljuc}",
@@ -286,7 +292,9 @@ def stavke_od_groka(biljeske: list[dict], aktivni: list[str]) -> list[dict]:
         raise Neuspjeh("Fali XAI_API_KEY.")
     telo = {
         "model": MODEL_GROKA,
-        "messages": [
+        # Responses API inače čuva odgovor za kasnije čitanje, a agentu to ne treba.
+        "store": False,
+        "input": [
             {"role": "system", "content": UPUTSTVO_GROKU},
             {
                 "role": "user",
@@ -295,9 +303,9 @@ def stavke_od_groka(biljeske: list[dict], aktivni: list[str]) -> list[dict]:
                 ),
             },
         ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
+        "text": {
+            "format": {
+                "type": "json_schema",
                 "name": "stavke_izvjestaja",
                 "strict": True,
                 "schema": sema_odgovora(aktivni),
@@ -306,11 +314,18 @@ def stavke_od_groka(biljeske: list[dict], aktivni: list[str]) -> list[dict]:
     }
     odgovor = pozovi_groka(json.dumps(telo, ensure_ascii=False).encode("utf-8"), kljuc)
     try:
-        sadrzaj = json.loads(json.loads(odgovor)["choices"][0]["message"]["content"])
-        stavke = sadrzaj["stavke"]
-    except (ValueError, TypeError, KeyError, IndexError):
+        stavke = json.loads(tekst_odgovora(json.loads(odgovor)))["stavke"]
+    except (ValueError, TypeError, KeyError, StopIteration):
         raise Neuspjeh("Odgovor Groka nije po šemi.") from None
     return provjerene_stavke(stavke, aktivni)
+
+
+def tekst_odgovora(odgovor: dict) -> str:
+    # Nedovršen odgovor nije po šemi, a ispred poruke u spisku mogu da budu druge stavke.
+    if odgovor["status"] != "completed":
+        raise ValueError
+    izlaz = next(stavka for stavka in odgovor["output"] if stavka["type"] == "message")
+    return next(dio["text"] for dio in izlaz["content"] if dio["type"] == "output_text")
 
 
 def provjerene_stavke(stavke, aktivni: list[str]) -> list[dict]:
@@ -351,7 +366,7 @@ def pisi(datum: str, koren: Path, upozorenja: list[str]) -> dict:
 
     provjeri_istoriju(koren)
     aktivni = aktivni_projekti(koren)
-    do = datetime.now(UTC).replace(second=0, microsecond=0)
+    do = sada().astimezone(UTC).replace(second=0, microsecond=0)
 
     prvi_izvjestaj_agenta = IME_AGENTA not in autori(koren, f"{FOLDER_IZVJESTAJA}/")
     postojeci = sorted(izvjestaji.glob("*.json"))

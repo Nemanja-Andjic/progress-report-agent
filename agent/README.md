@@ -54,7 +54,9 @@ Dok u istoriji `izvjestaji/` nema nijednog commita od `progress-report-agent`, s
 
 ### Grok
 
-`grok-4.7` preko `POST /v1/chat/completions`, sa `response_format: json_schema` (ADR 0006). Prolazne greške (mreža, 408, 429, 5xx) se pokušavaju do 3 puta, a ostali statusi i odgovor van šeme odmah su neuspjeh. xAI ovaj endpoint vodi kao legacy, bez datuma gašenja, pa ako ga ugasi, mijenja se samo poziv u `stavke_od_groka` i `pozovi_groka`.
+`grok-4.7` preko `POST /v1/responses`, sa `text.format` tipa `json_schema` i `strict: true` (ADR 0006). Prolazne greške (mreža, 408, 429, 5xx) se pokušavaju do 3 puta, a ostali statusi, nedovršen odgovor i odgovor van šeme odmah su neuspjeh.
+
+Zahtjev šalje `store: false`, da xAI ne čuva odgovor za kasnije čitanje. To ne isključuje čuvanje radi revizije: po xAI dokumentaciji, zahtjevi i odgovori stoje 30 dana, osim na timu sa Zero Data Retention.
 
 ### Provjera
 
@@ -76,4 +78,4 @@ Naslov se računa iz autora prvog commita fajla, isto kao oznaka porijekla na sa
 .venv/Scripts/python -m pytest
 ```
 
-Testovi rade nad privremenim git repoom, sa lažnim xAI serverom i lažnom komandom provjere, pa ne traže privatni repo ni ključ. Pravu vezu sa provjerom potvrđuje proba cijelog puta (#32).
+Testovi rade nad privremenim git repoom, sa lažnim xAI serverom (`XAI_ADRESA`, `XAI_PAUZA`), lažnom komandom provjere i, za prelazak na zimsko vrijeme, zadatim satom (`AGENT_SADA`), pa ne traže privatni repo ni ključ. Pravu vezu sa provjerom potvrđuje proba cijelog puta (#32). GitHub Actions (`.github/workflows/testovi.yml`) ih pokreće na push u `main` i na svaki pull request.

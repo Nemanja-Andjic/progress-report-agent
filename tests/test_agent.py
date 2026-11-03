@@ -53,8 +53,18 @@ def stavka(opis="Urađena stvar", projekat=AKTIVAN, **ostalo) -> dict:
     return {"kratak_opis": opis, "detalj": f"Detalj: {opis}", "projekat": projekat, **ostalo}
 
 
+def odgovor_sa_tekstom(tekst: str, status="completed") -> dict:
+    return {
+        "status": status,
+        "output": [
+            {"type": "reasoning", "summary": []},
+            {"type": "message", "content": [{"type": "output_text", "text": tekst}]},
+        ],
+    }
+
+
 def odgovor_groka(stavke) -> dict:
-    return {"choices": [{"message": {"content": json.dumps({"stavke": stavke})}}]}
+    return odgovor_sa_tekstom(json.dumps({"stavke": stavke}))
 
 
 class LazniGrok:
@@ -76,7 +86,7 @@ class LazniGrok:
         return json.dumps(self.zahtjevi, ensure_ascii=False)
 
     def biljeske(self) -> list[dict]:
-        return json.loads(self.zahtjevi[-1]["messages"][-1]["content"])["biljeske"]
+        return json.loads(self.zahtjevi[-1]["input"][-1]["content"])["biljeske"]
 
 
 @pytest.fixture
@@ -139,17 +149,17 @@ class Repo:
         self.git("commit", "-q", "--allow-empty", "-m", "Promjena", autor=autor)
 
     def biljeska(self, prije: timedelta, tekst="Tekst bilješke.", projekat=AKTIVAN) -> str:
-        vrijeme = datetime.now(UTC) - prije
-        ime = f"{vrijeme:%Y-%m-%dT%H%M%S}-{len(list(self.putanja.glob('biljeske-sesija/*')))}"
+        vrijeme = (datetime.now(UTC) - prije).isoformat(timespec="minutes")
+        return self.biljeska_u(vrijeme, tekst, projekat)
+
+    def biljeska_u(self, vrijeme: str, tekst="Tekst bilješke.", projekat=AKTIVAN) -> str:
+        # Dvije bilješke mogu da imaju isto vrijeme, pa ime nosi i redni broj.
+        ime = f"{datetime.fromisoformat(vrijeme).astimezone(UTC):%Y-%m-%dT%H%M%S}"
+        ime = f"{ime}-{len(list(self.putanja.glob('biljeske-sesija/*')))}"
         self.zapisi(
             f"biljeske-sesija/{ime}.json",
             json.dumps(
-                {
-                    "vrijeme": vrijeme.isoformat(timespec="minutes"),
-                    "projekat": projekat,
-                    "tekst": tekst,
-                },
-                ensure_ascii=False,
+                {"vrijeme": vrijeme, "projekat": projekat, "tekst": tekst}, ensure_ascii=False
             ),
         )
         return tekst
@@ -258,7 +268,7 @@ def test_novi_fajl_sa_podacima_koje_upisuje_python(repo, grok):
 def test_python_ne_uzima_od_groka_nista_osim_polja_stavke(repo, grok):
     repo.biljeska(timedelta(hours=2))
     sadrzaj = {"stavke": [stavka(datum="1999-01-01", broj=7)], "broj_stavki": 9, "datum": "1999-01-01"}
-    grok.vrati({"choices": [{"message": {"content": json.dumps(sadrzaj)}}]})
+    grok.vrati(odgovor_sa_tekstom(json.dumps(sadrzaj)))
 
     assert repo.pisi()["ishod"] == "novi-fajl"
 
@@ -274,11 +284,14 @@ def test_zahtjev_groku_ima_model_semu_i_kljuc(repo, grok):
     repo.pisi()
 
     zahtjev = grok.zahtjevi[0]
-    assert grok.putanja == "/v1/chat/completions"
+    assert grok.putanja == "/v1/responses"
     assert grok.zaglavlja[0]["Authorization"] == f"Bearer {KLJUC}"
     assert zahtjev["model"] == "grok-4.7"
-    assert zahtjev["response_format"]["type"] == "json_schema"
-    sema = zahtjev["response_format"]["json_schema"]["schema"]
+    assert zahtjev["store"] is False
+    format_odgovora = zahtjev["text"]["format"]
+    assert format_odgovora["type"] == "json_schema"
+    assert format_odgovora["strict"] is True
+    sema = format_odgovora["schema"]
     polja = sema["properties"]["stavke"]["items"]["properties"]
     assert set(polja) == {"kratak_opis", "detalj", "projekat"}
     assert polja["projekat"]["enum"] == [AKTIVAN, DRUGI_AKTIVAN]
@@ -442,8 +455,13 @@ def test_odbijen_zahtjev_se_ne_ponavlja(repo, grok):
         odgovor_groka([{"kratak_opis": "Bez detalja i projekta"}]),
         odgovor_groka([{**stavka(), "kratak_opis": "  "}]),
         odgovor_groka("nije spisak"),
-        {"choices": [{"message": {"content": f"nije json {POGODAK}"}}]},
-        {"choices": []},
+        odgovor_sa_tekstom(f"nije json {POGODAK}"),
+        odgovor_sa_tekstom(json.dumps({"stavke": [stavka()]}), status="incomplete"),
+        {"status": "completed", "output": [{"type": "reasoning", "summary": []}]},
+        {
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "refusal", "refusal": POGODAK}]}],
+        },
     ],
     ids=[
         "prazan-spisak",
@@ -453,7 +471,9 @@ def test_odbijen_zahtjev_se_ne_ponavlja(repo, grok):
         "prazan-opis",
         "stavke-nisu-spisak",
         "sadrzaj-nije-json",
-        "bez-odgovora",
+        "nedovrsen-odgovor",
+        "bez-poruke",
+        "odbijanje",
     ],
 )
 def test_los_odgovor_groka_je_neuspjeh(repo, grok, odgovor):
@@ -557,6 +577,44 @@ def test_poslije_obrisanih_izvjestaja_iz_probe_period_je_24_sata(repo, grok):
     period = repo.procitaj_izvjestaj()["period"]
     trajanje = datetime.fromisoformat(period["do"]) - datetime.fromisoformat(period["od"])
     assert trajanje == timedelta(hours=24)
+
+
+def test_period_preko_prelaska_na_zimsko_vrijeme_pokriva_25_sati(repo, grok):
+    # Sat se vraća 25.10.2026. u 03:00, pa 02:30 tog dana postoji dvaput.
+    repo.izvjestaj("2026-10-24", AGENT, datetime.fromisoformat("2026-10-24T23:30+02:00"))
+    repo.biljeska_u("2026-10-24T23:29+02:00", "Prije početka perioda.")
+    repo.biljeska_u("2026-10-24T23:30+02:00", "Na početku perioda.")
+    repo.biljeska_u("2026-10-25T02:30+02:00", "Prvi put 02:30.")
+    repo.biljeska_u("2026-10-25T02:30+01:00", "Drugi put 02:30.")
+    repo.biljeska_u("2026-10-25T23:29+01:00", "Prije kraja perioda.")
+    repo.biljeska_u("2026-10-25T23:30+01:00", "Na kraju perioda.")
+    okruzenje = {**repo.okruzenje(), "AGENT_SADA": "2026-10-25T22:30:40+00:00"}
+
+    assert repo.pisi("2026-10-25", okruzenje=okruzenje)["ishod"] == "novi-fajl"
+
+    period = repo.procitaj_izvjestaj("2026-10-25")["period"]
+    assert period == {"od": "2026-10-24T23:30+02:00", "do": "2026-10-25T23:30+01:00"}
+    trajanje = datetime.fromisoformat(period["do"]) - datetime.fromisoformat(period["od"])
+    assert trajanje == timedelta(hours=25)
+    assert [b["tekst"] for b in grok.biljeske()] == [
+        "Na početku perioda.",
+        "Prvi put 02:30.",
+        "Drugi put 02:30.",
+        "Prije kraja perioda.",
+    ]
+
+
+def test_bez_prethodnog_izvjestaja_preko_prelaska_su_24_stvarna_sata(repo, grok):
+    # Na satu izgleda kao 23 sata, jer dan prelaska ima 25.
+    repo.biljeska_u("2026-10-25T00:29+02:00", "Prije 24 sata i minut.")
+    repo.biljeska_u("2026-10-25T00:30+02:00", "Prije tačno 24 sata.")
+    okruzenje = {**repo.okruzenje(), "AGENT_SADA": "2026-10-25T22:30:40+00:00"}
+
+    assert repo.pisi("2026-10-25", okruzenje=okruzenje)["ishod"] == "novi-fajl"
+
+    period = repo.procitaj_izvjestaj("2026-10-25")["period"]
+    assert period == {"od": "2026-10-25T00:30+02:00", "do": "2026-10-25T23:30+01:00"}
+    assert [b["tekst"] for b in grok.biljeske()] == ["Prije tačno 24 sata."]
 
 
 def test_prvi_izvjestaj_agenta_ne_racuna_i_brise_rucne_primjere(repo, grok):
