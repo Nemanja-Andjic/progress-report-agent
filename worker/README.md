@@ -1,8 +1,8 @@
 # Worker
 
-Prima "završio" sa Telegrama, pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
+Prima "završio" sa Telegrama, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
 
-Pitanje o završetku, slanje u 23:00, javljanje aktivnosti i jutarnja provjera stižu u #27 do #30.
+Pitanje o završetku, javljanje aktivnosti i jutarnja provjera stižu u #28 do #30.
 
 ## Kako radi
 
@@ -13,14 +13,31 @@ Pitanje o završetku, slanje u 23:00, javljanje aktivnosti i jutarnja provjera s
 | `otvoren` | ništa nije pokrenuto | pokreće pisanje |
 | `pisanje` | workflow radi | odgovara da je pisanje u toku |
 | `bez_poruke` | rezultat je stigao, a poruka nije poslata | odgovara da poruka još nije poslata |
-| `neuspjeh` | pisanje nije uspjelo ili nije pokrenuto | pokreće novi pokušaj |
+| `neuspjeh` | pisanje nije uspjelo, nije pokrenuto ili se nije javilo u roku | pokreće novi pokušaj |
 | `zatvoren` | poruka je poslata | odgovara da je izvještaj već poslat |
 
 Svaki upis prolazi samo ako red nije mijenjan od učitavanja, pa od istovremenih događaja prolazi jedan. Zato dvije poruke pokreću jedno pisanje, a dva rezultata šalju jednu poruku.
 
 Dan se računa po zoni `Europe/Belgrade`. "završio" važi za tekući dan, a rezultat za dan iz svog `datum`, pa rezultat stigao poslije ponoći zatvara svoj dan.
 
-Rezultat koji stigne van faze `pisanje` ništa ne radi. Ako slanje ne uspije, ruta vraća 502, dan ostaje `bez_poruke`, a tekst ostaje u bazi. Ponovno slanje stiže u #27. Dok ono ne stigne, poruka iz tog stanja ne odlazi sama. Pisanje koje se nikad ne javi takođe ostaje u toku do #27.
+Rezultat koji stigne van faze `pisanje` ništa ne radi. Ako slanje ne uspije, ruta vraća 502, dan ostaje `bez_poruke`, a tekst ostaje u bazi dok cron ne pošalje poruku.
+
+## Cron
+
+Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lokalno vrijeme. Svaki put gleda današnji dan i ranije dane koji su još u fazi `pisanje` ili `bez_poruke`.
+
+| Faza | Šta cron radi |
+|---|---|
+| `otvoren`, `neuspjeh` | od 23:00 do ponoći, ako cron već nije pokretao pisanje za taj dan, pokreće pisanje |
+| `pisanje` | poslije 30 minuta bez rezultata prelazi u `neuspjeh` i upozorava Nemanju |
+| `bez_poruke` | ponavlja slanje, bez novog pisanja |
+| `zatvoren` | ništa |
+
+- **Jedan pokušaj.** Cron pokreće pisanje najviše jednom za dan, pa neuspjeh u 23:00 ne pravi novo pisanje svakih 5 minuta. "završio" i dalje pokreće novi pokušaj. Pisanje koje je "završio" pokrenuo prije toga ne troši pokušaj iz 23:00.
+- **Rokovi.** Računaju se po pravom vremenu, a ne po lokalnom satu, pa ih prelazak na ljetnje i zimsko vrijeme ne pomjera.
+- **Neuspjeh.** Mentor ne dobija ništa, pa ni "Danas nema zabilježenog rada". Dan ostaje nezatvoren, a rad ulazi u sljedeći izvještaj.
+- **Upozorenje o slanju.** Ako slanje ne uspije od 23:00 nadalje, Nemanja jednom dobija upozorenje. Ranije se slanje samo ponavlja.
+- **Dvostruko slanje.** Cron ne ponavlja slanje pokušano u posljednjih minut, pa ne šalje poruku koju ruta baš tada šalje. Ako Worker padne poslije poruke, a prije upisa `zatvoren`, ili odgovor Telegrama ne stigne, poruka može da ode dvaput. Telegram nema ključ koji bi to spriječio, a dvije iste poruke su bolje od poruke koja nikad ne stigne.
 
 ## Ulazi
 
@@ -46,7 +63,7 @@ Traži zaglavlje `Authorization: Bearer <ključ za Actions>`.
 | 200 | primljeno, a poruka je poslata ako je trebalo. Važi i za dvostruk rezultat |
 | 400 | tijelo nije ispravno, a stanje dana se ne mijenja |
 | 401 | fali ključ ili nije ispravan |
-| 502 | poruka nije poslata, a ponovno slanje radi Worker, ne workflow |
+| 502 | poruka nije poslata, a ponovno slanje radi cron Workera, ne workflow |
 
 ### Ono što Worker očekuje od #26
 

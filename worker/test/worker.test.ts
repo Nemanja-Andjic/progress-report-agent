@@ -31,6 +31,7 @@ type Env = typeof ENV;
 let poruke: { chat: number; tekst: string }[];
 let pokretanja: { url: string; token: string | null; telo: unknown }[];
 let telegramPada: boolean;
+let mentorPada: boolean;
 let githubPada: boolean;
 
 async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promise<Response> {
@@ -41,6 +42,7 @@ async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promi
       return new Response("{}", { status: 500 });
     }
     const telo = (await zahtjev.json()) as { chat_id: string; text: string };
+    if (mentorPada && Number(telo.chat_id) === CHAT_MENTOR) return new Response("{}", { status: 403 });
     poruke.push({ chat: Number(telo.chat_id), tekst: telo.text });
     return Response.json({ ok: true });
   }
@@ -81,7 +83,14 @@ function rezultatZahtjev(telo: unknown, kljuc: string | null = KLJUC_ACTIONS): R
 const zavrsio = (env?: Partial<Env>) => pozovi(telegramZahtjev("završio"), env);
 const gotovo = (tekst: string, env?: Partial<Env>, datum = DANAS) =>
   pozovi(rezultatZahtjev({ datum, ishod: "gotovo", tekst }), env);
+const neuspjeh = (env?: Partial<Env>, datum = DANAS) => pozovi(rezultatZahtjev({ datum, ishod: "neuspjeh" }), env);
 const porukeNaChat = (chat: number) => poruke.filter((poruka) => poruka.chat === chat);
+const cron = (env: Partial<Env> = ENV) => worker.scheduled({} as ScheduledController, env as Env);
+// Pomjeri sat, pa pokrene cron. Vrijeme je po UTC-u: 15.5. je 23:00 po lokalnom u 21:00 UTC.
+const cronU = (vrijeme: string, env?: Partial<Env>) => {
+  vi.setSystemTime(new Date(vrijeme));
+  return cron(env);
+};
 
 beforeEach(async () => {
   await reset();
@@ -89,6 +98,7 @@ beforeEach(async () => {
   poruke = [];
   pokretanja = [];
   telegramPada = false;
+  mentorPada = false;
   githubPada = false;
   vi.useFakeTimers({ toFake: ["Date"], now: PODNE });
   vi.spyOn(globalThis, "fetch").mockImplementation(lazniSvijet);
@@ -412,5 +422,298 @@ describe("ponoć po lokalnom vremenu", () => {
     await gotovo("Danas", ENV, "2030-05-16");
     await zavrsio();
     expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+  });
+});
+
+describe("cron u 23:00", () => {
+  const datumi = () => pokretanja.map((pokretanje) => (pokretanje.telo as { inputs: { datum: string } }).inputs.datum);
+
+  it("pokreće pisanje samo od sebe, sa datumom dana, a rezultat šalje poruku i zatvara dan", async () => {
+    await cronU("2030-05-15T20:55:00Z");
+    expect(pokretanja).toEqual([]);
+
+    await cronU("2030-05-15T21:00:00Z");
+    expect(datumi()).toEqual([DANAS]);
+
+    await cronU("2030-05-15T21:05:00Z");
+    expect(pokretanja).toHaveLength(1);
+
+    await gotovo("🤖 Izvještaj");
+    expect(poruke.at(-1)?.tekst).toBe("(proba)\n\n🤖 Izvještaj");
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+  });
+
+  it.each([
+    ["na ljetnje", "2030-03-30T23:00:00Z", 23, "2030-03-31"],
+    ["na zimsko", "2030-10-26T22:00:00Z", 25, "2030-10-27"],
+  ])("na dan prelaska %s kreće tačno jednom", async (_ime, pocetak, sati, datum) => {
+    const start = Date.parse(pocetak);
+    for (let korak = 0; korak < (sati * 60) / 5; korak++) {
+      await cronU(new Date(start + korak * 5 * 60_000).toISOString());
+    }
+
+    expect(datumi()).toEqual([datum]);
+  });
+
+  it('"završio" i cron u isto vrijeme pokreću samo jedno pisanje', async () => {
+    vi.setSystemTime(new Date("2030-05-15T21:00:00Z"));
+
+    await Promise.all([cron(), zavrsio(), cron(), zavrsio()]);
+
+    expect(pokretanja).toHaveLength(1);
+  });
+
+  it("na zatvoren dan ne radi ništa, a kasniji rad čeka izvještaj sljedećeg dana", async () => {
+    vi.setSystemTime(new Date("2030-05-15T16:00:00Z"));
+    await zavrsio();
+    await gotovo("Tekst");
+    poruke = [];
+
+    await cronU("2030-05-15T21:00:00Z");
+    expect(pokretanja).toHaveLength(1);
+    expect(poruke).toEqual([]);
+
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+    expect(pokretanja).toHaveLength(1);
+
+    await cronU("2030-05-16T21:00:00Z");
+    expect(datumi()).toEqual([DANAS, "2030-05-16"]);
+  });
+
+  it("dok pisanje traje ne pokreće novo", async () => {
+    vi.setSystemTime(new Date("2030-05-15T20:50:00Z"));
+    await zavrsio();
+
+    await cronU("2030-05-15T21:00:00Z");
+
+    expect(pokretanja).toHaveLength(1);
+  });
+});
+
+describe("dan bez rada", () => {
+  const TEKST = "Danas nema zabilježenog rada";
+
+  it("šalje poruku i zatvara dan", async () => {
+    await cronU("2030-05-15T21:00:00Z");
+
+    await gotovo(TEKST);
+
+    expect(poruke.at(-1)?.tekst).toBe(`(proba)\n\n${TEKST}`);
+    await cronU("2030-05-15T21:05:00Z");
+    expect(poruke.filter((poruka) => poruka.tekst.includes(TEKST))).toHaveLength(1);
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+  });
+
+  it("sa isključenim probnim režimom ide mentoru", async () => {
+    const env = { ...ENV, PROBNI_REZIM: "iskljucen" };
+    await cronU("2030-05-15T21:00:00Z", env);
+
+    await gotovo(TEKST, env);
+
+    expect(porukeNaChat(CHAT_MENTOR)).toEqual([{ chat: CHAT_MENTOR, tekst: TEKST }]);
+  });
+});
+
+describe("neuspjeh", () => {
+  const MENTOR = { ...ENV, PROBNI_REZIM: "iskljucen" };
+
+  it("mentor ne dobija ništa, a upozorenje ne liči na dan bez rada i ne nosi tekst iz zahtjeva", async () => {
+    await cronU("2030-05-15T21:00:00Z", MENTOR);
+
+    await pozovi(rezultatZahtjev({ datum: DANAS, ishod: "neuspjeh", tekst: "Tajna vrijednost" }), MENTOR);
+
+    expect(porukeNaChat(CHAT_MENTOR)).toEqual([]);
+    expect(porukeNaChat(CHAT_NEMANJA).map((poruka) => poruka.tekst)).toEqual([
+      'Pisanje izvještaja za 15.5.2030. nije uspjelo. Pošalji "završio" za novi pokušaj.',
+    ]);
+  });
+
+  it("dan ostaje otvoren: preko dana nema ničega, a 23:00 pokušava još jednom", async () => {
+    vi.setSystemTime(new Date("2030-05-15T16:00:00Z"));
+    await zavrsio();
+    await neuspjeh();
+    poruke = [];
+
+    await cronU("2030-05-15T16:05:00Z");
+    await cronU("2030-05-15T20:30:00Z");
+    expect(poruke).toEqual([]);
+    expect(pokretanja).toHaveLength(1);
+
+    await cronU("2030-05-15T21:00:00Z");
+    expect(pokretanja).toHaveLength(2);
+
+    await gotovo("Tekst");
+    expect(poruke.at(-1)?.tekst).toBe("(proba)\n\nTekst");
+  });
+
+  it('neuspjeh pokušaja iz 23:00 se ne ponavlja sam, a "završio" pokreće novi', async () => {
+    await cronU("2030-05-15T21:00:00Z");
+    await neuspjeh();
+
+    await cronU("2030-05-15T21:05:00Z");
+    await cronU("2030-05-15T21:10:00Z");
+    expect(pokretanja).toHaveLength(1);
+
+    await zavrsio();
+    expect(pokretanja).toHaveLength(2);
+  });
+
+  it("nepokrenut workflow u 23:00 daje upozorenje i ne ponavlja se svakih 5 minuta", async () => {
+    githubPada = true;
+    await cronU("2030-05-15T21:00:00Z");
+    await cronU("2030-05-15T21:05:00Z");
+
+    expect(poruke.map((poruka) => poruka.tekst)).toEqual([
+      'Pisanje izvještaja za 15.5.2030. nije pokrenuto. Pošalji "završio" za novi pokušaj.',
+    ]);
+  });
+});
+
+describe("rok pisanja", () => {
+  const UPOZORENJE = 'Pisanje izvještaja za 15.5.2030. se nije javilo u roku. Pošalji "završio" za novi pokušaj.';
+
+  it("pisanje koje se ne javi 30 minuta je neuspjeh, a novo završio ga ponavlja", async () => {
+    await zavrsio();
+    poruke = [];
+
+    await cronU("2030-05-15T10:25:00Z");
+    expect(poruke).toEqual([]);
+
+    await cronU("2030-05-15T10:30:00Z");
+    expect(poruke.map((poruka) => poruka.tekst)).toEqual([UPOZORENJE]);
+
+    await cronU("2030-05-15T10:35:00Z");
+    expect(poruke).toHaveLength(1);
+
+    await zavrsio();
+    expect(pokretanja).toHaveLength(2);
+  });
+
+  it("rezultat stigao poslije roka ne šalje poruku", async () => {
+    await zavrsio();
+    await cronU("2030-05-15T10:30:00Z");
+
+    expect((await gotovo("Kasno")).status).toBe(200);
+
+    expect(poruke.some((poruka) => poruka.tekst.includes("Kasno"))).toBe(false);
+  });
+
+  it("pisanje iz 22:50 koje se ne javi dobija pokušaj iz 23:00", async () => {
+    vi.setSystemTime(new Date("2030-05-15T20:50:00Z"));
+    await zavrsio();
+
+    await cronU("2030-05-15T21:20:00Z");
+    await cronU("2030-05-15T21:25:00Z");
+
+    expect(pokretanja).toHaveLength(2);
+  });
+
+  it("rok istekao poslije ponoći javlja jučerašnji dan i ne dira današnji", async () => {
+    vi.setSystemTime(new Date("2030-05-15T21:55:00Z"));
+    await zavrsio();
+    poruke = [];
+
+    await cronU("2030-05-15T22:25:00Z");
+
+    expect(poruke.map((poruka) => poruka.tekst)).toEqual([UPOZORENJE]);
+    expect(pokretanja).toHaveLength(1);
+    await zavrsio();
+    expect(pokretanja.at(-1)?.telo).toEqual({ ref: "main", inputs: { datum: "2030-05-16" } });
+  });
+});
+
+describe("neuspjelo slanje poruke", () => {
+  const MENTOR = { ...ENV, PROBNI_REZIM: "iskljucen" };
+  const UPOZORENJE = "Poruka o izvještaju za 15.5.2030. nije poslata. Pokušavam ponovo svakih 5 minuta.";
+
+  it("sljedeći cron ga ponavlja, bez novog pisanja, pa zatvara dan", async () => {
+    await zavrsio();
+    telegramPada = true;
+    await gotovo("Tekst");
+    telegramPada = false;
+    expect(poruke.some((poruka) => poruka.tekst.includes("Tekst"))).toBe(false);
+
+    await cronU("2030-05-15T10:05:00Z");
+    expect(poruke.filter((poruka) => poruka.tekst === "(proba)\n\nTekst")).toHaveLength(1);
+    expect(pokretanja).toHaveLength(1);
+
+    await cronU("2030-05-15T10:10:00Z");
+    expect(poruke.filter((poruka) => poruka.tekst === "(proba)\n\nTekst")).toHaveLength(1);
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+  });
+
+  it("ponavlja se dok ne uspije, a poslije 23:00 Nemanja dobija jedno upozorenje", async () => {
+    mentorPada = true;
+    vi.setSystemTime(new Date("2030-05-15T20:50:00Z"));
+    await zavrsio(MENTOR);
+    await gotovo("Tekst", MENTOR);
+    poruke = [];
+
+    await cronU("2030-05-15T20:55:00Z", MENTOR);
+    expect(poruke).toEqual([]);
+
+    await cronU("2030-05-15T21:00:00Z", MENTOR);
+    await cronU("2030-05-15T21:05:00Z", MENTOR);
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: UPOZORENJE }]);
+
+    mentorPada = false;
+    await cronU("2030-05-15T21:10:00Z", MENTOR);
+    expect(porukeNaChat(CHAT_MENTOR)).toEqual([{ chat: CHAT_MENTOR, tekst: "Tekst" }]);
+  });
+
+  it("rezultat koji u 23:00 ne može da pošalje poruku odmah upozorava", async () => {
+    mentorPada = true;
+    await cronU("2030-05-15T21:00:00Z", MENTOR);
+
+    expect((await gotovo("Tekst", MENTOR)).status).toBe(502);
+
+    expect(poruke.at(-1)).toEqual({ chat: CHAT_NEMANJA, tekst: UPOZORENJE });
+  });
+
+  it("nastavlja se poslije ponoći, a novi dan radi nezavisno", async () => {
+    await zavrsio();
+    telegramPada = true;
+    await gotovo("Juče");
+    telegramPada = false;
+
+    await cronU("2030-05-16T21:00:00Z");
+
+    expect(poruke.filter((poruka) => poruka.tekst === "(proba)\n\nJuče")).toHaveLength(1);
+    expect(pokretanja.at(-1)?.telo).toEqual({ ref: "main", inputs: { datum: "2030-05-16" } });
+  });
+
+  it("cron u trenutku kad rezultat šalje poruku ne šalje je drugi put", async () => {
+    await zavrsio();
+
+    await Promise.all([gotovo("Tekst"), cron(), cron()]);
+
+    expect(poruke.filter((poruka) => poruka.tekst.includes("Tekst"))).toHaveLength(1);
+  });
+
+  it("dva cron-a u isto vrijeme ponavljaju poruku jednom", async () => {
+    await zavrsio();
+    telegramPada = true;
+    await gotovo("Tekst");
+    telegramPada = false;
+    vi.setSystemTime(new Date("2030-05-15T10:05:00Z"));
+
+    await Promise.all([cron(), cron()]);
+
+    expect(poruke.filter((poruka) => poruka.tekst.includes("Tekst"))).toHaveLength(1);
+  });
+
+  it("u probnom režimu ni ponovljena poruka ne ide na mentorov chat", async () => {
+    await zavrsio();
+    telegramPada = true;
+    await gotovo("Tekst");
+    telegramPada = false;
+
+    await cronU("2030-05-15T10:05:00Z");
+
+    expect(porukeNaChat(CHAT_MENTOR)).toEqual([]);
   });
 });

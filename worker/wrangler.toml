@@ -7,6 +7,10 @@ compatibility_date = "2026-11-01"
 [vars]
 PROBNI_REZIM = "ukljucen"
 
+# Po UTC-u. Lokalno vrijeme Worker računa sam, pa 23:00 ne zavisi od ljetnjeg i zimskog vremena.
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "progress-report-worker"
