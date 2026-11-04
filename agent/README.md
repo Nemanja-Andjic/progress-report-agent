@@ -75,7 +75,7 @@ Dok u istoriji `izvjestaji/` nema nijednog commita od `progress-report-agent`, s
 
 ### Grok
 
-`grok-4.7` preko `POST /v1/responses`, sa `text.format` tipa `json_schema` i `strict: true` (ADR 0006). Prolazne greške (mreža, 408, 429, 5xx) se pokušavaju do 3 puta, a ostali statusi, nedovršen odgovor i odgovor van šeme odmah su neuspjeh.
+`grok-4.7` preko `POST /v1/responses`, sa `text.format` tipa `json_schema` i `strict: true` (ADR 0006). Razmišljanje je na najnižem nivou (`reasoning.effort: low`). Prolazne greške (mreža, isteklo vrijeme, 408, 429, 5xx) se pokušavaju najviše 2 puta, sa rokom od 480 s po pokušaju, pa sve staje u rok workflowa od 25 minuta. Ostali statusi, nedovršen odgovor i odgovor van šeme odmah su neuspjeh. Razlog neuspjeha kaže šta se desilo posljednji put (`isteklo vrijeme`, `status 503`, `greška mreže`) i nikad ne sadrži odgovor servisa.
 
 Zahtjev šalje `store: false`, da xAI ne čuva odgovor za kasnije čitanje. To ne isključuje čuvanje radi revizije: po xAI dokumentaciji, zahtjevi i odgovori stoje 30 dana, osim na timu sa Zero Data Retention.
 
@@ -118,4 +118,4 @@ Naslov se računa iz autora prvog commita fajla, isto kao oznaka porijekla na sa
 .venv/Scripts/python -m pytest
 ```
 
-Testovi rade nad privremenim git repoom, sa lažnim xAI serverom (`XAI_ADRESA`, `XAI_PAUZA`), lažnim GitHub serverom (`AGENT_GITHUB_ADRESA`, `AGENT_GITHUB_PAUZA`), lažnom komandom provjere i, za prelazak na zimsko vrijeme, zadatim satom (`AGENT_SADA`), pa ne traže privatni repo, ključ ni token. Pravu vezu sa provjerom potvrđuje proba cijelog puta (#32). GitHub Actions (`.github/workflows/testovi.yml`) ih pokreće na push u `main` i na svaki pull request.
+Testovi rade nad privremenim git repoom, sa lažnim xAI serverom (`XAI_ADRESA`, `XAI_PAUZA`, `XAI_ROK`), lažnim GitHub serverom (`AGENT_GITHUB_ADRESA`, `AGENT_GITHUB_PAUZA`), lažnom komandom provjere i, za prelazak na zimsko vrijeme, zadatim satom (`AGENT_SADA`), pa ne traže privatni repo, ključ ni token. Pravu vezu sa provjerom potvrđuje proba cijelog puta (#32). GitHub Actions (`.github/workflows/testovi.yml`) ih pokreće na push u `main` i na svaki pull request.

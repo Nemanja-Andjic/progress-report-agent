@@ -5,11 +5,15 @@ repoa, i lažne xAI i GitHub servere. Komanda se pokreće kao što bi je pokrenu
 samo ishod, šta je u repou i šta je stiglo do Groka. Svi podaci su izmišljeni.
 """
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from hashlib import sha1
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,6 +107,7 @@ class LazniGrok:
         self.zahtjevi: list[dict] = []
         self.zaglavlja: list = []
         self.odgovori: list[tuple[int, bytes]] = []
+        self.kasnjenje = 0.0
         self.vrati(odgovor_groka([stavka()]))
 
     def vrati(self, *sadrzaji) -> None:
@@ -134,6 +139,7 @@ def grok():
             lazni.zahtjevi.append(json.loads(telo))
             lazni.zaglavlja.append(dict(self.headers))
             lazni.putanja = self.path
+            time.sleep(lazni.kasnjenje)
             status, odgovor = (
                 lazni.odgovori.pop(0) if len(lazni.odgovori) > 1 else lazni.odgovori[0]
             )
@@ -479,6 +485,7 @@ def test_zahtjev_groku_ima_model_semu_i_kljuc(repo, grok):
     assert grok.zaglavlja[0]["Authorization"] == f"Bearer {KLJUC}"
     assert zahtjev["model"] == "grok-4.7"
     assert zahtjev["store"] is False
+    assert zahtjev["reasoning"] == {"effort": "low"}
     format_odgovora = zahtjev["text"]["format"]
     assert format_odgovora["type"] == "json_schema"
     assert format_odgovora["strict"] is True
@@ -612,14 +619,63 @@ def test_grok_ne_odgovara_poslije_ponovljenih_pokusaja(repo, grok):
     izlaz = repo.pisi()
 
     tvrdi_neuspjeh_bez_fajla(repo, izlaz)
-    assert len(grok.zahtjevi) == 3
+    assert len(grok.zahtjevi) == 2
+    assert izlaz["razlog"] == "Grok nije odgovorio ni poslije 2 pokušaja (status 500)."
+
+
+def test_grok_koji_ne_stigne_u_roku_je_isteklo_vrijeme(repo, grok):
+    repo.biljeska(timedelta(hours=2))
+    grok.kasnjenje = 1.0
+    okruzenje = {**repo.okruzenje(), "XAI_ROK": "0.2"}
+
+    izlaz = repo.pisi(okruzenje=okruzenje)
+
+    tvrdi_neuspjeh_bez_fajla(repo, izlaz)
+    assert len(grok.zahtjevi) == 2
+    assert izlaz["razlog"] == "Grok nije odgovorio ni poslije 2 pokušaja (isteklo vrijeme)."
 
 
 def test_grok_ne_postoji_na_mrezi(repo, grok):
     repo.biljeska(timedelta(hours=2))
     okruzenje = {**repo.okruzenje(), "XAI_ADRESA": "http://127.0.0.1:1/v1"}
 
-    tvrdi_neuspjeh_bez_fajla(repo, repo.pisi(okruzenje=okruzenje))
+    izlaz = repo.pisi(okruzenje=okruzenje)
+
+    tvrdi_neuspjeh_bez_fajla(repo, izlaz)
+    assert izlaz["razlog"] == "Grok nije odgovorio ni poslije 2 pokušaja (greška mreže)."
+
+
+@pytest.fixture
+def agent(monkeypatch):
+    """Agent kao modul, sa podrazumijevanim vrijednostima, za ono što se ne vidi izvana."""
+    monkeypatch.delenv("XAI_ROK", raising=False)
+    monkeypatch.delenv("XAI_PAUZA", raising=False)
+    specifikacija = importlib.util.spec_from_file_location("agent_za_test", SKRIPTA)
+    modul = importlib.util.module_from_spec(specifikacija)
+    monkeypatch.setitem(sys.modules, specifikacija.name, modul)
+    specifikacija.loader.exec_module(modul)
+    return modul
+
+
+def test_svi_pokusaji_groka_staju_u_rok_workflowa(agent):
+    # Workflow prekida posao poslije 25 minuta, a Worker čeka 30. Provjerava se strožiji rok.
+    assert agent.ROK_GROKA == 480
+    assert agent.POKUSAJI_GROKA == 2
+    ukupno = agent.POKUSAJI_GROKA * agent.ROK_GROKA + agent.PAUZA_GROKA
+    assert ukupno < 25 * 60
+
+
+def test_isteklo_vrijeme_pri_povezivanju_se_ne_vodi_kao_greska_mreze(agent, monkeypatch):
+    # urllib grešku pri povezivanju umota u URLError, a grešku pri čekanju odgovora ne.
+    def urlopen(*_, **__):
+        raise urllib.error.URLError(TimeoutError("tekst koji ne smije u poruku"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(agent.Neuspjeh) as greska:
+        agent.posalji(urllib.request.Request("http://example.invalid"), "Grok", 0, 1, 2)
+
+    assert str(greska.value) == "Grok nije odgovorio ni poslije 2 pokušaja (isteklo vrijeme)."
 
 
 def test_grok_odgovori_iz_drugog_pokusaja(repo, grok):
@@ -1284,6 +1340,7 @@ def test_greska_githuba_je_neuspjeh_a_ne_dan_bez_rada(
     assert grok.zahtjevi == []
     assert sum(putanja in adresa for adresa in github.trazeno) == broj_pokusaja
     assert "greska" not in izlaz["razlog"]
+    assert f"status {status}" in izlaz["razlog"]
 
 
 @pytest.mark.parametrize(
