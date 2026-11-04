@@ -24,3 +24,26 @@ jobs:
 
       - name: Pokreni testove
         run: python -m pytest -v
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Instaliraj zavisnosti
+        run: npm ci
+
+      - name: Provjeri tipove
+        run: npm run tipovi
+
+      - name: Pokreni testove
+        run: npm test
