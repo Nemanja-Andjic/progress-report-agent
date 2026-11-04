@@ -15,5 +15,5 @@ crons = ["*/5 * * * *"]
 binding = "DB"
 database_name = "progress-report-worker"
 # Upisuje se u #25, poslije `wrangler d1 create`. Dok je ovako, objava pada.
-database_id = "upisi-id-baze"
+database_id = "8b997196-2371-46e5-a575-6b7aaa01b616"
 migrations_dir = "migrations"
