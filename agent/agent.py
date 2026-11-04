@@ -43,7 +43,9 @@ ROK_GITA = 60
 MODEL_GROKA = "grok-4.7"
 ADRESA_XAI = os.environ.get("XAI_ADRESA", "https://api.x.ai/v1")
 PAUZA_GROKA = float(os.environ.get("XAI_PAUZA", 15))
-ROK_GROKA = 180
+# Svi pokušaji Groka moraju da stanu u rok workflowa (25 minuta), a Worker čeka 30.
+ROK_GROKA = float(os.environ.get("XAI_ROK", 480))
+POKUSAJI_GROKA = 2
 
 ADRESA_GITHUB = os.environ.get("AGENT_GITHUB_ADRESA", "https://api.github.com")
 # Računa se samo rad ovog naloga, pa ni tuđ issue ni bot ne mogu da naprave izvještaj.
@@ -290,7 +292,9 @@ def stranice_githuba(adresa: str, token: str) -> Iterator:
                 "User-Agent": IME_AGENTA,
             },
         )
-        sadrzaj, zaglavlja = posalji(zahtjev, "GitHub", PAUZA_GITHUBA, ROK_GITHUBA)
+        sadrzaj, zaglavlja = posalji(
+            zahtjev, "GitHub", PAUZA_GITHUBA, ROK_GITHUBA, POKUSAJI_ZAHTJEVA
+        )
         yield json.loads(sadrzaj)
         sljedeca = re.search(r'<([^>]+)>;\s*rel="next"', zaglavlja.get("Link") or "")
         adresa = sljedeca[1] if sljedeca else ""
@@ -524,9 +528,18 @@ def sema_odgovora(aktivni: list[str]) -> dict:
     }
 
 
-def posalji(zahtjev: urllib.request.Request, ime: str, pauza: float, rok: int) -> tuple[bytes, dict]:
+def razlog_bez_odgovora(greska: Exception) -> str:
+    # Grešku pri povezivanju urllib umota u URLError, a grešku pri čekanju odgovora ne.
+    uzrok = greska.reason if isinstance(greska, urllib.error.URLError) else greska
+    return "isteklo vrijeme" if isinstance(uzrok, TimeoutError) else "greška mreže"
+
+
+def posalji(
+    zahtjev: urllib.request.Request, ime: str, pauza: float, rok: float, pokusaji: int
+) -> tuple[bytes, dict]:
     """Sadržaj i zaglavlja odgovora. Poruka greške nikad ne sadrži odgovor servisa."""
-    for pokusaj in range(POKUSAJI_ZAHTJEVA):
+    razlog = ""
+    for pokusaj in range(pokusaji):
         if pokusaj:
             time.sleep(pauza * pokusaj)
         try:
@@ -535,9 +548,10 @@ def posalji(zahtjev: urllib.request.Request, ime: str, pauza: float, rok: int) -
         except urllib.error.HTTPError as greska:
             if greska.code not in PROLAZNI_STATUSI:
                 raise Neuspjeh(f"{ime} je odbio zahtjev (status {greska.code}).") from None
-        except (OSError, http.client.HTTPException):
-            pass
-    raise Neuspjeh(f"{ime} nije odgovorio ni poslije {POKUSAJI_ZAHTJEVA} pokušaja.")
+            razlog = f"status {greska.code}"
+        except (OSError, http.client.HTTPException) as greska:
+            razlog = razlog_bez_odgovora(greska)
+    raise Neuspjeh(f"{ime} nije odgovorio ni poslije {pokusaji} pokušaja ({razlog}).")
 
 
 def pozovi_groka(telo: bytes, kljuc: str) -> bytes:
@@ -551,7 +565,7 @@ def pozovi_groka(telo: bytes, kljuc: str) -> bytes:
             "User-Agent": IME_AGENTA,
         },
     )
-    return posalji(zahtjev, "Grok", PAUZA_GROKA, ROK_GROKA)[0]
+    return posalji(zahtjev, "Grok", PAUZA_GROKA, ROK_GROKA, POKUSAJI_GROKA)[0]
 
 
 def stavke_od_groka(
@@ -564,6 +578,8 @@ def stavke_od_groka(
         "model": MODEL_GROKA,
         # Responses API inače čuva odgovor za kasnije čitanje, a agentu to ne treba.
         "store": False,
+        # Podrazumijevani nivo je "high", a veliki ulaz sa njim ne stiže na vrijeme.
+        "reasoning": {"effort": "low"},
         "input": [
             {"role": "system", "content": UPUTSTVO_GROKU},
             {
