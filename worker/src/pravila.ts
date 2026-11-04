@@ -14,11 +14,14 @@ export interface StanjeDana {
   pokusaj23: boolean;
   // Nemanja je već upozoren da poruka nije poslata.
   upozoren: boolean;
+  // Trenutak posljednjeg javljanja hooka tog dana, po satu Workera (ADR 0005).
+  posljednjaAktivnost: number | null;
 }
 
 export type Dogadjaj =
   | { vrsta: "zavrsio" }
   | { vrsta: "cron" }
+  | { vrsta: "aktivnost" }
   | { vrsta: "rezultat"; ishod: "gotovo"; tekst: string }
   | { vrsta: "rezultat"; ishod: "neuspjeh" }
   | { vrsta: "pokretanje_nije_uspjelo" }
@@ -70,7 +73,15 @@ export function lokalnoVrijeme(sada: Date): LokalnoVrijeme {
 }
 
 export function noviDan(datum: string): StanjeDana {
-  return { datum, faza: "otvoren", tekst: null, uTokuOd: null, pokusaj23: false, upozoren: false };
+  return {
+    datum,
+    faza: "otvoren",
+    tekst: null,
+    uTokuOd: null,
+    pokusaj23: false,
+    upozoren: false,
+    posljednjaAktivnost: null,
+  };
 }
 
 function citljivDatum(datum: string): string {
@@ -156,6 +167,10 @@ export function primijeni(stanje: StanjeDana, dogadjaj: Dogadjaj, lokalno: Lokal
 
     case "cron":
       return cron(stanje, lokalno);
+
+    case "aktivnost":
+      // Samo vrijeme, u svakoj fazi: ni zatvoren dan se ne otvara, ni pisanje se ne prekida.
+      return { stanje: { ...stanje, posljednjaAktivnost: lokalno.trenutak }, radnje: [] };
 
     case "rezultat":
       if (stanje.faza !== "pisanje") return nista;

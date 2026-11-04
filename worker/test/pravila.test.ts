@@ -66,6 +66,55 @@ describe('"završio"', () => {
   });
 });
 
+describe("aktivnost", () => {
+  const aktivnost = { vrsta: "aktivnost" } as const;
+
+  it.each(["otvoren", "pisanje", "bez_poruke", "neuspjeh", "zatvoren"] as const)(
+    "u fazi %s pamti samo vrijeme i ne radi ništa drugo",
+    (faza) => {
+      const pocetno = { ...dan(faza, "Tekst"), uTokuOd: 123, pokusaj23: true, upozoren: true };
+      const { stanje, radnje } = primijeni(pocetno, aktivnost, u(DATUM, 14, 30));
+
+      expect(stanje).toEqual({ ...pocetno, posljednjaAktivnost: u(DATUM, 14, 30).trenutak });
+      expect(radnje).toEqual([]);
+    },
+  );
+
+  it("zatvoren dan ostaje zatvoren i za događaje koji stignu poslije nje", () => {
+    const { stanje } = primijeni(dan("zatvoren"), aktivnost, u(DATUM, 20, 0));
+
+    expect(primijeni(stanje, zavrsio, u(DATUM, 20, 5)).radnje).toEqual([
+      { vrsta: "posalji_nemanji", tekst: "Izvještaj za danas je već poslat." },
+    ]);
+    expect(primijeni(stanje, cron, u(DATUM, 23, 0)).radnje).toEqual([]);
+  });
+
+  it("nova aktivnost pomjera vrijeme", () => {
+    const prva = primijeni(noviDan(DATUM), aktivnost, u(DATUM, 14, 0)).stanje;
+
+    expect(primijeni(prva, aktivnost, u(DATUM, 15, 0)).stanje.posljednjaAktivnost).toBe(u(DATUM, 15, 0).trenutak);
+  });
+
+  it("ostaje zapamćena kroz pisanje i zatvaranje dana", () => {
+    const trenutak = u(DATUM, 14, 0).trenutak;
+    const pisanje = primijeni(primijeni(noviDan(DATUM), aktivnost, u(DATUM, 14, 0)).stanje, zavrsio, u(DATUM, 15, 0));
+    const poruka = primijeni(pisanje.stanje, { vrsta: "rezultat", ishod: "gotovo", tekst: "Tekst" }, u(DATUM, 15, 5));
+    const zatvoren = primijeni(poruka.stanje, { vrsta: "poruka_poslata" }, u(DATUM, 15, 5));
+
+    expect(pisanje.stanje.posljednjaAktivnost).toBe(trenutak);
+    expect(zatvoren.stanje).toMatchObject({ faza: "zatvoren", posljednjaAktivnost: trenutak });
+  });
+
+  it("novi dan počinje bez aktivnosti, iako je juče bilo", () => {
+    const juce = primijeni(noviDan(DATUM), aktivnost, u(DATUM, 14, 0)).stanje;
+
+    expect(primijeni(juce, zavrsio, u("2030-05-16", 9, 0)).stanje).toMatchObject({
+      datum: "2030-05-16",
+      posljednjaAktivnost: null,
+    });
+  });
+});
+
 describe("rezultat iz Actions", () => {
   const gotovo = { vrsta: "rezultat", ishod: "gotovo", tekst: "Tekst poruke" } as const;
   const neuspjeh = { vrsta: "rezultat", ishod: "neuspjeh" } as const;
