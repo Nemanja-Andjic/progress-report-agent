@@ -2,15 +2,16 @@
 // Vidi worker/README.md.
 
 import {
+  lokalnoVrijeme,
   noviDan,
   primijeni,
   type Dogadjaj,
+  type Faza,
   type LokalnoVrijeme,
   type Radnja,
   type StanjeDana,
 } from "./pravila";
 
-const ZONA = "Europe/Belgrade";
 const REPO_IZVJESTAJA = "Nemanja-Andjic/progress-report-izvjestaji";
 const WORKFLOW_PISANJA = "pisanje-i-objava.yml";
 const ROK_POZIVA_MS = 10_000;
@@ -34,22 +35,27 @@ interface UcitanDan {
   verzija: number;
 }
 
-const FORMAT_VREMENA = new Intl.DateTimeFormat("en-CA", {
-  timeZone: ZONA,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
+interface RedDana {
+  datum: string;
+  faza: Faza;
+  tekst: string | null;
+  u_toku_od: number | null;
+  pokusaj_23: number;
+  upozoren: number;
+  verzija: number;
+}
 
-function lokalnoVrijeme(sada: Date): LokalnoVrijeme {
-  const dijelovi = Object.fromEntries(FORMAT_VREMENA.formatToParts(sada).map((dio) => [dio.type, dio.value]));
+function izReda(red: RedDana): UcitanDan {
   return {
-    datum: `${dijelovi.year}-${dijelovi.month}-${dijelovi.day}`,
-    sat: Number(dijelovi.hour),
-    minut: Number(dijelovi.minute),
+    stanje: {
+      datum: red.datum,
+      faza: red.faza,
+      tekst: red.tekst,
+      uTokuOd: red.u_toku_od,
+      pokusaj23: Boolean(red.pokusaj_23),
+      upozoren: Boolean(red.upozoren),
+    },
+    verzija: red.verzija,
   };
 }
 
@@ -63,18 +69,13 @@ async function kljucVazi(primljen: string | null | undefined, ocekivan: string |
 }
 
 async function ucitajDan(db: D1Database, datum: string): Promise<UcitanDan> {
-  const red = await db
-    .prepare("SELECT datum, faza, tekst, verzija FROM dani WHERE datum = ?1")
-    .bind(datum)
-    .first<StanjeDana & { verzija: number }>();
-  return red ? { stanje: red, verzija: red.verzija } : { stanje: noviDan(datum), verzija: 0 };
+  const red = await db.prepare("SELECT * FROM dani WHERE datum = ?1").bind(datum).first<RedDana>();
+  return red ? izReda(red) : { stanje: noviDan(datum), verzija: 0 };
 }
 
 async function ucitajPosljednjiDan(db: D1Database, danas: string): Promise<UcitanDan> {
-  const red = await db
-    .prepare("SELECT datum, faza, tekst, verzija FROM dani ORDER BY datum DESC LIMIT 1")
-    .first<StanjeDana & { verzija: number }>();
-  return red ? { stanje: red, verzija: red.verzija } : { stanje: noviDan(danas), verzija: 0 };
+  const red = await db.prepare("SELECT * FROM dani ORDER BY datum DESC LIMIT 1").first<RedDana>();
+  return red ? izReda(red) : { stanje: noviDan(danas), verzija: 0 };
 }
 
 // Upisuje samo ako red nije mijenjan od učitavanja. Zato od dva istovremena događaja prolazi
@@ -82,11 +83,22 @@ async function ucitajPosljednjiDan(db: D1Database, danas: string): Promise<Ucita
 async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promise<boolean> {
   const rezultat = await db
     .prepare(
-      `INSERT INTO dani (datum, faza, tekst, verzija) VALUES (?1, ?2, ?3, ?4 + 1)
-       ON CONFLICT (datum) DO UPDATE SET faza = excluded.faza, tekst = excluded.tekst, verzija = excluded.verzija
+      `INSERT INTO dani (datum, faza, tekst, u_toku_od, pokusaj_23, upozoren, verzija)
+       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?4 + 1)
+       ON CONFLICT (datum) DO UPDATE SET faza = excluded.faza, tekst = excluded.tekst,
+         u_toku_od = excluded.u_toku_od, pokusaj_23 = excluded.pokusaj_23, upozoren = excluded.upozoren,
+         verzija = excluded.verzija
        WHERE dani.verzija = ?4`,
     )
-    .bind(stanje.datum, stanje.faza, stanje.tekst, verzija)
+    .bind(
+      stanje.datum,
+      stanje.faza,
+      stanje.tekst,
+      verzija,
+      stanje.uTokuOd,
+      Number(stanje.pokusaj23),
+      Number(stanje.upozoren),
+    )
     .run();
   return rezultat.meta.changes === 1;
 }
@@ -170,7 +182,10 @@ async function izvrsi(env: Env, datum: string, radnje: Radnja[], lokalno: Lokaln
         await posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, radnja.tekst);
         break;
       case "posalji_mentoru":
-        if (!(await posaljiMentoru(env, radnja.tekst))) return false;
+        if (!(await posaljiMentoru(env, radnja.tekst))) {
+          await nastavi({ vrsta: "slanje_nije_uspjelo" });
+          return false;
+        }
         await nastavi({ vrsta: "poruka_poslata" });
         break;
     }
@@ -233,11 +248,29 @@ async function rezultat(zahtjev: Request, env: Env): Promise<Response> {
   return new Response(null, { status: poslato ? 200 : 502 });
 }
 
+// Pored današnjeg gleda i ranije dane koji još čekaju, npr. pisanje pokrenuto prije ponoći.
+async function cron(env: Env): Promise<void> {
+  const lokalno = lokalnoVrijeme(new Date());
+  const { results } = await env.DB.prepare(
+    "SELECT datum FROM dani WHERE faza IN ('pisanje', 'bez_poruke') AND datum <> ?1 ORDER BY datum",
+  )
+    .bind(lokalno.datum)
+    .all<{ datum: string }>();
+
+  for (const datum of [...results.map((red) => red.datum), lokalno.datum]) {
+    const radnje = await predji(env.DB, () => ucitajDan(env.DB, datum), { vrsta: "cron" }, lokalno);
+    await izvrsi(env, datum, radnje, lokalno);
+  }
+}
+
 export default {
   async fetch(zahtjev, env) {
     const { pathname } = new URL(zahtjev.url);
     if (zahtjev.method === "POST" && pathname === "/telegram") return telegram(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/rezultat") return rezultat(zahtjev, env);
     return new Response(null, { status: 404 });
+  },
+  async scheduled(_kontroler, env) {
+    await cron(env);
   },
 } satisfies ExportedHandler<Env>;
