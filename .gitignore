@@ -4,9 +4,14 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+# Node i Worker
+node_modules/
+.wrangler/
+
 # Tajne: tokeni, API ključevi, lozinke
 .env
 .env.*
+.dev.vars*
 
 # Lična podešavanja
 .vscode/
