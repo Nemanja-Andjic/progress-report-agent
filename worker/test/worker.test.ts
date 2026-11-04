@@ -7,6 +7,7 @@ const CHAT_MENTOR = 222;
 const CHAT_TUDJI = 333;
 const TAJNA_WEBHOOKA = "lazna-tajna-webhooka";
 const KLJUC_ACTIONS = "lazni-kljuc-actions";
+const KLJUC_HOOKA = "lazni-kljuc-hooka";
 const TOKEN_BOTA = "lazni-token-bota";
 const TOKEN_GITHUBA = "lazni-token-githuba";
 
@@ -22,6 +23,7 @@ const ENV = {
   TELEGRAM_CHAT_MENTOR: String(CHAT_MENTOR),
   GITHUB_TOKEN: TOKEN_GITHUBA,
   KLJUC_ACTIONS,
+  KLJUC_HOOKA,
   PROBNI_REZIM: "ukljucen",
 };
 
@@ -80,6 +82,18 @@ function rezultatZahtjev(telo: unknown, kljuc: string | null = KLJUC_ACTIONS): R
   });
 }
 
+function aktivnostZahtjev(kljuc: string | null = KLJUC_HOOKA, telo?: string): Request {
+  const zaglavlja: Record<string, string> = kljuc ? { Authorization: `Bearer ${kljuc}` } : {};
+  return new Request("https://worker.test/aktivnost", { method: "POST", headers: zaglavlja, body: telo });
+}
+
+const aktivnost = (env?: Partial<Env>) => pozovi(aktivnostZahtjev(), env);
+// Jedini izuzetak od pravila da testovi ne gledaju u bazu: dok #29 ne stigne, ovo vrijeme se spolja ne vidi.
+const posljednjaAktivnost = (datum = DANAS) =>
+  bazniEnv.DB.prepare("SELECT posljednja_aktivnost AS vrijeme FROM dani WHERE datum = ?1")
+    .bind(datum)
+    .first<{ vrijeme: number | null }>()
+    .then((red) => red?.vrijeme ?? null);
 const zavrsio = (env?: Partial<Env>) => pozovi(telegramZahtjev("završio"), env);
 const gotovo = (tekst: string, env?: Partial<Env>, datum = DANAS) =>
   pozovi(rezultatZahtjev({ datum, ishod: "gotovo", tekst }), env);
@@ -134,6 +148,7 @@ describe("ključevi", () => {
     ["bez tajne", null],
     ["sa pogrešnom tajnom", "pogresna"],
     ["sa ključem za Actions", KLJUC_ACTIONS],
+    ["sa ključem hooka", KLJUC_HOOKA],
   ])("webhook odbija zahtjev %s i ne radi ništa", async (_ime, tajna) => {
     const odgovor = await pozovi(telegramZahtjev("završio", CHAT_NEMANJA, tajna));
 
@@ -146,6 +161,7 @@ describe("ključevi", () => {
     ["bez ključa", null],
     ["sa pogrešnim ključem", "pogresan"],
     ["sa tajnom webhook-a", TAJNA_WEBHOOKA],
+    ["sa ključem hooka", KLJUC_HOOKA],
   ])("ruta za rezultate odbija zahtjev %s i ne šalje ništa", async (_ime, kljuc) => {
     await zavrsio();
     poruke = [];
@@ -156,17 +172,137 @@ describe("ključevi", () => {
     expect(poruke).toEqual([]);
   });
 
+  it.each([
+    ["bez ključa", null],
+    ["sa pogrešnim ključem", "pogresan"],
+    ["sa ključem za Actions", KLJUC_ACTIONS],
+    ["sa tajnom webhook-a", TAJNA_WEBHOOKA],
+  ])("ruta za aktivnost odbija zahtjev %s i ne pamti ništa", async (_ime, kljuc) => {
+    const odgovor = await pozovi(aktivnostZahtjev(kljuc));
+
+    expect(odgovor.status).toBe(401);
+    expect(await posljednjaAktivnost()).toBeNull();
+  });
+
   it("ključ koji nije podešen ne pušta nikoga", async () => {
-    const bezTajni = { ...ENV, TELEGRAM_WEBHOOK_TAJNA: undefined, KLJUC_ACTIONS: undefined };
+    const bezTajni = { ...ENV, TELEGRAM_WEBHOOK_TAJNA: undefined, KLJUC_ACTIONS: undefined, KLJUC_HOOKA: undefined };
 
     expect((await pozovi(telegramZahtjev("završio", CHAT_NEMANJA, "undefined"), bezTajni)).status).toBe(401);
     expect((await pozovi(rezultatZahtjev({ datum: DANAS, ishod: "neuspjeh" }, "undefined"), bezTajni)).status).toBe(401);
+    expect((await pozovi(aktivnostZahtjev("undefined"), bezTajni)).status).toBe(401);
     expect(pokretanja).toEqual([]);
+    expect(await posljednjaAktivnost()).toBeNull();
   });
 
   it("nepoznata adresa i pogrešna metoda ne postoje", async () => {
     expect((await pozovi(new Request("https://worker.test/nesto", { method: "POST" }))).status).toBe(404);
     expect((await pozovi(new Request("https://worker.test/telegram"))).status).toBe(404);
+    expect((await pozovi(new Request("https://worker.test/aktivnost"))).status).toBe(404);
+  });
+});
+
+describe("javljanje aktivnosti", () => {
+  it("prima zahtjev bez odgovora u tijelu, pamti vrijeme i ne šalje ništa", async () => {
+    const odgovor = await aktivnost();
+
+    expect(odgovor.status).toBe(204);
+    expect(await odgovor.text()).toBe("");
+    expect(await posljednjaAktivnost()).toBe(PODNE.getTime());
+    expect(poruke).toEqual([]);
+    expect(pokretanja).toEqual([]);
+  });
+
+  it("vrijeme određuje Worker svojim satom, a tijelo zahtjeva se ne čita", async () => {
+    const telo = JSON.stringify({ vrijeme: 1, datum: "2000-01-01", faza: "zatvoren", prompt: "Tekst razgovora" });
+
+    expect((await pozovi(aktivnostZahtjev(KLJUC_HOOKA, telo))).status).toBe(204);
+
+    expect(await posljednjaAktivnost()).toBe(PODNE.getTime());
+    expect(await posljednjaAktivnost("2000-01-01")).toBeNull();
+  });
+
+  it("sljedeća aktivnost pomjera vrijeme", async () => {
+    await aktivnost();
+    vi.setSystemTime(new Date("2030-05-15T11:00:00Z"));
+    await aktivnost();
+
+    expect(await posljednjaAktivnost()).toBe(Date.parse("2030-05-15T11:00:00Z"));
+  });
+
+  it("na zatvoren dan ne otvara dan i ne šalje ništa", async () => {
+    await zavrsio();
+    await gotovo("Tekst");
+    poruke = [];
+
+    expect((await aktivnost()).status).toBe(204);
+    expect(poruke).toEqual([]);
+
+    await cronU("2030-05-15T21:00:00Z");
+    expect(pokretanja).toHaveLength(1);
+    expect(poruke).toEqual([]);
+
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+    expect(pokretanja).toHaveLength(1);
+  });
+
+  it("dan sa samo aktivnošću preko dana ćuti, a u 23:00 kreće pisanje jednom", async () => {
+    await aktivnost();
+
+    await cronU("2030-05-15T10:05:00Z");
+    expect(pokretanja).toEqual([]);
+    expect(poruke).toEqual([]);
+
+    await cronU("2030-05-15T21:00:00Z");
+    await cronU("2030-05-15T21:05:00Z");
+    expect(pokretanja).toHaveLength(1);
+  });
+
+  it("poslije ponoći važi za novi dan i ne dira zatvoren jučerašnji", async () => {
+    await zavrsio();
+    await gotovo("Tekst");
+    const juce = await posljednjaAktivnost();
+
+    vi.setSystemTime(new Date("2030-05-15T22:30:00Z"));
+    await aktivnost();
+
+    expect(await posljednjaAktivnost()).toBe(juce);
+    expect(await posljednjaAktivnost("2030-05-16")).toBe(Date.parse("2030-05-15T22:30:00Z"));
+
+    await zavrsio();
+    expect(pokretanja.at(-1)?.telo).toEqual({ ref: "main", inputs: { datum: "2030-05-16" } });
+  });
+
+  it("za vrijeme pisanja ne prekida čekanje na rezultat", async () => {
+    await zavrsio();
+
+    await aktivnost();
+    await gotovo("Tekst");
+
+    expect(poruke.at(-1)?.tekst).toBe("(proba)\n\nTekst");
+  });
+
+  it("ne briše tekst poruke koja još nije poslata", async () => {
+    await zavrsio();
+    telegramPada = true;
+    await gotovo("Tekst");
+    telegramPada = false;
+
+    await aktivnost();
+    await cronU("2030-05-15T10:05:00Z");
+
+    expect(poruke.filter((poruka) => poruka.tekst === "(proba)\n\nTekst")).toHaveLength(1);
+  });
+
+  it('u isto vrijeme kad i "završio" ne gubi se ni pisanje ni aktivnost', async () => {
+    const odgovori = await Promise.all([aktivnost(), zavrsio(), aktivnost(), zavrsio()]);
+
+    expect(odgovori.map((odgovor) => odgovor.status)).toEqual([204, 200, 204, 200]);
+    expect(pokretanja).toHaveLength(1);
+    expect(await posljednjaAktivnost()).toBe(PODNE.getTime());
+
+    await gotovo("Tekst");
+    expect(poruke.at(-1)?.tekst).toBe("(proba)\n\nTekst");
   });
 });
 

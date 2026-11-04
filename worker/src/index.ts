@@ -27,6 +27,7 @@ interface Env {
   TELEGRAM_CHAT_MENTOR?: string;
   GITHUB_TOKEN?: string;
   KLJUC_ACTIONS?: string;
+  KLJUC_HOOKA?: string;
   PROBNI_REZIM?: string;
 }
 
@@ -42,6 +43,7 @@ interface RedDana {
   u_toku_od: number | null;
   pokusaj_23: number;
   upozoren: number;
+  posljednja_aktivnost: number | null;
   verzija: number;
 }
 
@@ -54,6 +56,7 @@ function izReda(red: RedDana): UcitanDan {
       uTokuOd: red.u_toku_od,
       pokusaj23: Boolean(red.pokusaj_23),
       upozoren: Boolean(red.upozoren),
+      posljednjaAktivnost: red.posljednja_aktivnost,
     },
     verzija: red.verzija,
   };
@@ -66,6 +69,10 @@ async function kljucVazi(primljen: string | null | undefined, ocekivan: string |
     [primljen, ocekivan].map((tekst) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(tekst))),
   );
   return crypto.subtle.timingSafeEqual(a, b);
+}
+
+function kljucIzZaglavlja(zahtjev: Request): string | undefined {
+  return zahtjev.headers.get("Authorization")?.replace(/^Bearer /, "");
 }
 
 async function ucitajDan(db: D1Database, datum: string): Promise<UcitanDan> {
@@ -83,11 +90,11 @@ async function ucitajPosljednjiDan(db: D1Database, danas: string): Promise<Ucita
 async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promise<boolean> {
   const rezultat = await db
     .prepare(
-      `INSERT INTO dani (datum, faza, tekst, u_toku_od, pokusaj_23, upozoren, verzija)
-       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?4 + 1)
+      `INSERT INTO dani (datum, faza, tekst, u_toku_od, pokusaj_23, upozoren, posljednja_aktivnost, verzija)
+       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?8, ?4 + 1)
        ON CONFLICT (datum) DO UPDATE SET faza = excluded.faza, tekst = excluded.tekst,
          u_toku_od = excluded.u_toku_od, pokusaj_23 = excluded.pokusaj_23, upozoren = excluded.upozoren,
-         verzija = excluded.verzija
+         posljednja_aktivnost = excluded.posljednja_aktivnost, verzija = excluded.verzija
        WHERE dani.verzija = ?4`,
     )
     .bind(
@@ -98,6 +105,7 @@ async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promi
       stanje.uTokuOd,
       Number(stanje.pokusaj23),
       Number(stanje.upozoren),
+      stanje.posljednjaAktivnost,
     )
     .run();
   return rezultat.meta.changes === 1;
@@ -234,8 +242,7 @@ function dogadjajRezultata(telo: any): Dogadjaj | null {
 }
 
 async function rezultat(zahtjev: Request, env: Env): Promise<Response> {
-  const kljuc = zahtjev.headers.get("Authorization")?.replace(/^Bearer /, "");
-  if (!(await kljucVazi(kljuc, env.KLJUC_ACTIONS))) return new Response(null, { status: 401 });
+  if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_ACTIONS))) return new Response(null, { status: 401 });
 
   const telo = await zahtjev.json<any>().catch(() => null);
   const dogadjaj = dogadjajRezultata(telo);
@@ -246,6 +253,15 @@ async function rezultat(zahtjev: Request, env: Env): Promise<Response> {
   const radnje = await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno);
   const poslato = await izvrsi(env, datum, radnje, lokalno);
   return new Response(null, { status: poslato ? 200 : 502 });
+}
+
+// Tijelo zahtjeva se ne čita, a vrijeme je po satu Workera: zahtjev ne može da unese ništa drugo (ADR 0005).
+async function aktivnost(zahtjev: Request, env: Env): Promise<Response> {
+  if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_HOOKA))) return new Response(null, { status: 401 });
+
+  const lokalno = lokalnoVrijeme(new Date());
+  await predji(env.DB, () => ucitajDan(env.DB, lokalno.datum), { vrsta: "aktivnost" }, lokalno);
+  return new Response(null, { status: 204 });
 }
 
 // Pored današnjeg gleda i ranije dane koji još čekaju, npr. pisanje pokrenuto prije ponoći.
@@ -268,6 +284,7 @@ export default {
     const { pathname } = new URL(zahtjev.url);
     if (zahtjev.method === "POST" && pathname === "/telegram") return telegram(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/rezultat") return rezultat(zahtjev, env);
+    if (zahtjev.method === "POST" && pathname === "/aktivnost") return aktivnost(zahtjev, env);
     return new Response(null, { status: 404 });
   },
   async scheduled(_kontroler, env) {

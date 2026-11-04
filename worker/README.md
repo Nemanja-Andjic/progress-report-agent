@@ -1,8 +1,8 @@
 # Worker
 
-Prima "završio" sa Telegrama, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
+Prima "završio" sa Telegrama, pamti posljednju aktivnost iz hooka, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
 
-Pitanje o završetku, javljanje aktivnosti i jutarnja provjera stižu u #28 do #30.
+Pitanje o završetku i jutarnja provjera stižu u #29 i #30. Do #29 posljednju aktivnost niko ne koristi, samo se pamti.
 
 ## Kako radi
 
@@ -65,6 +65,19 @@ Traži zaglavlje `Authorization: Bearer <ključ za Actions>`.
 | 401 | fali ključ ili nije ispravan |
 | 502 | poruka nije poslata, a ponovno slanje radi cron Workera, ne workflow |
 
+### `POST /aktivnost`
+
+Traži zaglavlje `Authorization: Bearer <ključ hooka>`. Taj ključ ne radi ni na jednoj drugoj ruti, a nijedan drugi ključ ne radi na ovoj. Poziva ga hook iz [hookovi/aktivnost.py](../hookovi/aktivnost.py) (ADR 0005).
+
+Tijelo se ne čita, pa zahtjev ne može da unese ništa osim signala da je aktivnost bila. Vrijeme određuje Worker svojim satom i upisuje ga u današnji dan po zoni `Europe/Belgrade`. Prva aktivnost poslije ponoći pravi red za novi dan, a jučerašnji dan ostaje kakav je bio.
+
+Aktivnost mijenja samo vrijeme. Zatvoren dan ostaje zatvoren, pisanje koje je u toku teče dalje, a ništa se ne šalje.
+
+| Status | Značenje |
+|---|---|
+| 204 | vrijeme je upisano |
+| 401 | fali ključ ili nije ispravan |
+
 ### Ono što Worker očekuje od #26
 
 Worker pokreće `pisanje-i-objava.yml` u privatnom repou, na grani `main`, sa ulazom `datum`. Workflow ne računa datum sam.
@@ -112,6 +125,7 @@ Svaka se upisuje komandom `npx wrangler secret put IME`, koja vrijednost traži 
 | `TELEGRAM_CHAT_MENTOR` | ID mentorovog chata, samo na Workeru |
 | `GITHUB_TOKEN` | fine-grained token, samo za privatni repo i samo Actions: write |
 | `KLJUC_ACTIONS` | ključ za rute za Actions, isti je i u GitHub Secrets privatnog repoa |
+| `KLJUC_HOOKA` | ključ za javljanje aktivnosti, različit od `KLJUC_ACTIONS`, npr. `openssl rand -hex 32`. Drugi primjerak je samo na Nemanjinom računaru (vidi [hookovi/README.md](../hookovi/README.md)) |
 
 Tajna koja fali se ponaša bezbjedno: ulaz bez svog ključa odbija svaki zahtjev.
 
