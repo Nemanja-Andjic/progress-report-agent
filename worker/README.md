@@ -1,8 +1,8 @@
 # Worker
 
-Prima "završio" sa Telegrama, pamti posljednju aktivnost iz hooka, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
+Prima "završio" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
 
-Pitanje o završetku i jutarnja provjera stižu u #29 i #30. Do #29 posljednju aktivnost niko ne koristi, samo se pamti.
+Jutarnja provjera stiže u #30.
 
 ## Kako radi
 
@@ -28,7 +28,7 @@ Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lo
 
 | Faza | Šta cron radi |
 |---|---|
-| `otvoren`, `neuspjeh` | od 23:00 do ponoći, ako cron već nije pokretao pisanje za taj dan, pokreće pisanje |
+| `otvoren`, `neuspjeh` | od 23:00 do ponoći, ako cron već nije pokretao pisanje za taj dan, pokreće pisanje. U fazi `otvoren` ranije može da pokrene provjeru prije pitanja |
 | `pisanje` | poslije 30 minuta bez rezultata prelazi u `neuspjeh` i upozorava Nemanju |
 | `bez_poruke` | ponavlja slanje, bez novog pisanja |
 | `zatvoren` | ništa |
@@ -39,11 +39,48 @@ Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lo
 - **Upozorenje o slanju.** Ako slanje ne uspije od 23:00 nadalje, Nemanja jednom dobija upozorenje. Ranije se slanje samo ponavlja.
 - **Dvostruko slanje.** Cron ne ponavlja slanje pokušano u posljednjih minut, pa ne šalje poruku koju ruta baš tada šalje. Ako Worker padne poslije poruke, a prije upisa `zatvoren`, ili odgovor Telegrama ne stigne, poruka može da ode dvaput. Telegram nema ključ koji bi to spriječio, a dvije iste poruke su bolje od poruke koja nikad ne stigne.
 
+## Pitanje o završetku
+
+Cron pokreće `provjera-svjezeg-rada.yml` u privatnom repou kad su ispunjeni svi uslovi:
+
+- dan je u fazi `otvoren`, pa je isključeno sve što je u toku, neuspjeh i zatvoren dan;
+- vrijeme je između 16:00 i 22:30, obje granice uključene;
+- tog dana je bilo aktivnosti iz hooka. Dan bez signala nema pitanje, a pokriva ga slanje u 23:00;
+- pauza je bar 60 minuta;
+- nema pitanja bez odgovora, ni provjere koja je u toku;
+- prošlo je odlaganje, ako ga ima.
+
+Workflow javi ishod, a Worker odlučuje:
+
+| Javljanje | Šta Worker radi |
+|---|---|
+| `nema-svjezeg-rada` | šalje pitanje sa dugmadima "Jesam" i "Nije" |
+| `svjez-rad`, rad mlađi od 60 minuta | odlaže za 60 minuta od tog rada. Posljednja aktivnost se ne mijenja |
+| `svjez-rad`, rad star 60 minuta ili više | šalje pitanje |
+| `neuspjeh` ili ništa u roku od 15 minuta | nova provjera poslije 30 minuta, bez pitanja i bez poruke |
+
+- **Stariji rad.** `svjez-rad` iz agenta daje posljednji rad u cijelom periodu izvještaja, pa i onaj od jutros. Zato se računa samo rad mlađi od pauze, inače pitanje ne bi krenulo nijednog dana sa commitom.
+- **Aktivnost za vrijeme provjere.** Pitanje se ne šalje, jer pauze više nema, nego opet važi 60 minuta.
+- **Oznaka provjere.** Svako pokretanje dobija svoju oznaku, a workflow je vraća. Javljanje sa drugom oznakom se ne računa, pa provjera koja je zakasnila ne odlučuje umjesto nove.
+- **Rok za pitanje.** Provjera kreće najkasnije u 22:30, a javljanje poslije 15 minuta je neuspjeh, pa pitanje stiže najkasnije do 22:45.
+- **Neuspjelo slanje.** Pitanje koje Telegram ne primi ne čeka odgovor, a nova provjera kreće poslije 30 minuta. Isto važi i kad GitHub ne pokrene workflow.
+
+Dugmad:
+
+| Dugme | Šta radi |
+|---|---|
+| "Jesam" | isto što i poruka "završio": pokreće pisanje odmah, a drugi pritisak ne pokreće novo |
+| "Nije" | nova provjera za 30 minuta. Ako je u međuvremenu bilo aktivnosti, opet važi 60 minuta pauze. Provjera koja je u toku se odbacuje |
+| dugme od ranijeg dana | odgovor "Pitanje je isteklo.", bez ikakve radnje |
+| dugme sa tuđeg chata | ignoriše se, bez odgovora |
+
+Na pitanje bez odgovora nema novog pitanja dok se ne pojavi nova aktivnost. Poslije nje opet važi 60 minuta pauze, a dugmad sa starog pitanja i dalje važe do ponoći. Pritisak zato ne zavisi od toga koje je pitanje posljednje.
+
 ## Ulazi
 
 ### `POST /telegram`
 
-Traži zaglavlje `X-Telegram-Bot-Api-Secret-Token`. Prima samo poruku "završio", sa Nemanjinog chata, bez obzira na velika slova, razmake oko riječi i kvačicu na `š`. Sve ostalo se tiho preskače, sa statusom 200, da Telegram ne ponavlja zahtjev.
+Traži zaglavlje `X-Telegram-Bot-Api-Secret-Token`. Prima poruku "završio", sa Nemanjinog chata, bez obzira na velika slova, razmake oko riječi i kvačicu na `š`, i pritisak na dugme sa pitanja (`callback_query`). Sve ostalo se tiho preskače, sa statusom 200, da Telegram ne ponavlja zahtjev.
 
 ### `POST /actions/rezultat`
 
@@ -65,6 +102,22 @@ Traži zaglavlje `Authorization: Bearer <ključ za Actions>`.
 | 401 | fali ključ ili nije ispravan |
 | 502 | poruka nije poslata, a ponovno slanje radi cron Workera, ne workflow |
 
+### `POST /actions/provjera`
+
+Traži isti ključ kao `/actions/rezultat`. Poziva ga `provjera-svjezeg-rada.yml`, koji `datum` i `oznaka` dobija od Workera.
+
+```json
+{ "datum": "2030-05-15", "oznaka": "1905430800000", "ishod": "svjez-rad", "vrijeme": "2030-05-15T14:30+02:00" }
+```
+
+`ishod` je `svjez-rad`, `nema-svjezeg-rada` ili `neuspjeh`. `vrijeme` je obavezno samo za `svjez-rad` i mora da ima zonu. Čitaju se samo ova polja.
+
+| Status | Značenje |
+|---|---|
+| 200 | primljeno. Važi i za dvostruko i zakasnilo javljanje, koje ništa ne mijenja |
+| 400 | tijelo nije ispravno, a stanje dana se ne mijenja |
+| 401 | fali ključ ili nije ispravan |
+
 ### `POST /aktivnost`
 
 Traži zaglavlje `Authorization: Bearer <ključ hooka>`. Taj ključ ne radi ni na jednoj drugoj ruti, a nijedan drugi ključ ne radi na ovoj. Poziva ga hook iz [hookovi/aktivnost.py](../hookovi/aktivnost.py) (ADR 0005).
@@ -78,9 +131,9 @@ Aktivnost mijenja samo vrijeme. Zatvoren dan ostaje zatvoren, pisanje koje je u 
 | 204 | vrijeme je upisano |
 | 401 | fali ključ ili nije ispravan |
 
-### Ono što Worker očekuje od #26
+### Ono što Worker očekuje od privatnog repoa
 
-Worker pokreće `pisanje-i-objava.yml` u privatnom repou, na grani `main`, sa ulazom `datum`. Workflow ne računa datum sam.
+Worker pokreće `pisanje-i-objava.yml` na grani `main`, sa ulazom `datum`, i `provjera-svjezeg-rada.yml` na grani `main`, sa ulazima `datum` i `oznaka`. Workflow ne računa datum sam.
 
 ## Probni režim
 
@@ -139,7 +192,7 @@ read -rs TAJNA_WEBHOOKA
 curl -sS "https://api.telegram.org/bot$TOKEN_BOTA/setWebhook" \
   -d "url=https://ADRESA_WORKERA/telegram" \
   -d "secret_token=$TAJNA_WEBHOOKA" \
-  -d 'allowed_updates=["message"]'
+  -d 'allowed_updates=["message","callback_query"]'
 ```
 
 Dok je webhook uključen, `getUpdates` za tog bota ne radi.

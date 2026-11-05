@@ -257,9 +257,317 @@ describe("cron u 23:00", () => {
   });
 
   it("poslije neuspjeha preko dana cron do 23:00 ne šalje ništa, pa ni pitanje", () => {
+    const pocetno = { ...dan("neuspjeh"), posljednjaAktivnost: u(DATUM, 12, 0).trenutak };
     for (let sat = 16; sat < 23; sat++) {
-      expect(primijeni(dan("neuspjeh"), cron, u(DATUM, sat, 0)).radnje).toEqual([]);
+      expect(primijeni(pocetno, cron, u(DATUM, sat, 0)).radnje).toEqual([]);
     }
+  });
+});
+
+describe("pitanje o završetku", () => {
+  const aktivnost = { vrsta: "aktivnost" } as const;
+  const POKRENI = { vrsta: "pokreni_provjeru", datum: DATUM };
+  const aktivanU = (sat: number, minut = 0) => primijeni(noviDan(DATUM), aktivnost, u(DATUM, sat, minut)).stanje;
+  // Dan u kom je provjera pokrenuta u datom trenutku, a posljednja aktivnost je 60 minuta ranije.
+  const uProvjeri = (sat = 17, minut = 0) => {
+    const stanje = primijeni(aktivanU(sat - 1, minut), cron, u(DATUM, sat, minut)).stanje;
+    expect(stanje.provjeraOd).not.toBeNull();
+    return { stanje, oznaka: String(stanje.provjeraOd) };
+  };
+  const bezRada = (oznaka: string) => ({ vrsta: "provjera", oznaka, ishod: "nema-svjezeg-rada" }) as const;
+  const sRadom = (oznaka: string, vrijeme: number) =>
+    ({ vrsta: "provjera", oznaka, ishod: "svjez-rad", vrijeme }) as const;
+  const palo = (oznaka: string) => ({ vrsta: "provjera", oznaka, ishod: "neuspjeh" }) as const;
+  const pitanje = () => {
+    const { stanje, oznaka } = uProvjeri();
+    return primijeni(stanje, bezRada(oznaka), u(DATUM, 17, 2)).stanje;
+  };
+  const dugme = (odgovor: "jesam" | "nije", datum = DATUM) => ({ vrsta: "dugme", id: "d1", datum, odgovor }) as const;
+
+  describe("uslovi za provjeru", () => {
+    it.each([
+      ["15:59 je rano", 15, 59, false],
+      ["16:00 je prvi trenutak", 16, 0, true],
+      ["22:30 je posljednji trenutak", 22, 30, true],
+      ["22:31 je kasno", 22, 31, false],
+    ])("%s", (_ime, sat, minut, krece) => {
+      const { radnje } = primijeni(aktivanU(14), cron, u(DATUM, sat, minut));
+
+      expect(radnje.length > 0).toBe(krece);
+    });
+
+    it("pauza mora biti bar 60 minuta", () => {
+      const pocetno = aktivanU(16, 1);
+      const prerano = { ...u(DATUM, 17, 0), trenutak: u(DATUM, 17, 1).trenutak - 1 };
+
+      expect(primijeni(pocetno, cron, prerano).radnje).toEqual([]);
+      expect(primijeni(pocetno, cron, u(DATUM, 17, 1)).radnje).toEqual([
+        { ...POKRENI, oznaka: String(u(DATUM, 17, 1).trenutak) },
+      ]);
+    });
+
+    it("dan bez signala iz hooka nema provjeru", () => {
+      const pocetno = noviDan(DATUM);
+
+      expect(primijeni(pocetno, cron, u(DATUM, 18, 0))).toEqual({ stanje: pocetno, radnje: [] });
+    });
+
+    it.each(["pisanje", "bez_poruke", "neuspjeh", "zatvoren"] as const)("u fazi %s nema provjere", (faza) => {
+      const pocetno = {
+        ...dan(faza, "Tekst"),
+        uTokuOd: u(DATUM, 17, 59).trenutak,
+        posljednjaAktivnost: u(DATUM, 12).trenutak,
+      };
+
+      expect(primijeni(pocetno, cron, u(DATUM, 18, 0)).radnje).not.toContainEqual(
+        expect.objectContaining({ vrsta: "pokreni_provjeru" }),
+      );
+    });
+
+    it("dok je provjera u toku nema druge", () => {
+      const { stanje } = uProvjeri();
+
+      expect(primijeni(stanje, cron, u(DATUM, 17, 5)).radnje).toEqual([]);
+    });
+
+    it("provjera ne mijenja posljednju aktivnost", () => {
+      expect(uProvjeri().stanje.posljednjaAktivnost).toBe(u(DATUM, 16, 0).trenutak);
+    });
+  });
+
+  describe("rezultat provjere", () => {
+    it("bez svježeg rada šalje pitanje", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const prelaz = primijeni(stanje, bezRada(oznaka), u(DATUM, 17, 2));
+
+      expect(prelaz.radnje).toEqual([{ vrsta: "posalji_pitanje", datum: DATUM, tekst: "Da li si završio za danas?" }]);
+      expect(prelaz.stanje).toMatchObject({ provjeraOd: null, pitanjeOd: u(DATUM, 17, 2).trenutak });
+    });
+
+    it("sa svježim radom odlaže 60 minuta od tog rada i ne dira posljednju aktivnost", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const prelaz = primijeni(stanje, sRadom(oznaka, u(DATUM, 16, 40).trenutak), u(DATUM, 17, 2));
+
+      expect(prelaz.radnje).toEqual([]);
+      expect(prelaz.stanje.posljednjaAktivnost).toBe(stanje.posljednjaAktivnost);
+
+      const prije = { ...u(DATUM, 17, 39), trenutak: u(DATUM, 17, 40).trenutak - 1 };
+      expect(primijeni(prelaz.stanje, cron, prije).radnje).toEqual([]);
+      expect(primijeni(prelaz.stanje, cron, u(DATUM, 17, 40)).radnje).toEqual([
+        { ...POKRENI, oznaka: String(u(DATUM, 17, 40).trenutak) },
+      ]);
+    });
+
+    it("rad star 60 minuta ne odlaže pitanje, inače bi jutarnji commit držao pitanje cijeli dan", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const { radnje } = primijeni(stanje, sRadom(oznaka, u(DATUM, 16, 2).trenutak), u(DATUM, 17, 2));
+
+      expect(radnje.map((radnja) => radnja.vrsta)).toEqual(["posalji_pitanje"]);
+    });
+
+    it("rad star 59 minuta još odlaže", () => {
+      const { stanje, oznaka } = uProvjeri();
+
+      expect(primijeni(stanje, sRadom(oznaka, u(DATUM, 16, 3).trenutak), u(DATUM, 17, 2)).radnje).toEqual([]);
+    });
+
+    it("vrijeme iz budućnosti ne odlaže duže od pauze", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const { stanje: poslije } = primijeni(stanje, sRadom(oznaka, u(DATUM, 22, 0).trenutak), u(DATUM, 17, 2));
+
+      expect(poslije.odlozenoDo).toBe(u(DATUM, 18, 2).trenutak);
+    });
+
+    it("aktivnost dok provjera traje poništava pitanje, pa opet važi 60 minuta pauze", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const sAktivnoscu = primijeni(stanje, aktivnost, u(DATUM, 17, 1)).stanje;
+      const prelaz = primijeni(sAktivnoscu, bezRada(oznaka), u(DATUM, 17, 2));
+
+      expect(prelaz.radnje).toEqual([]);
+      expect(primijeni(prelaz.stanje, cron, u(DATUM, 18, 0)).radnje).toEqual([]);
+      expect(primijeni(prelaz.stanje, cron, u(DATUM, 18, 1)).radnje).toHaveLength(1);
+    });
+
+    it("javljanje sa tuđom oznakom ne radi ništa", () => {
+      const { stanje } = uProvjeri();
+
+      expect(primijeni(stanje, bezRada("123"), u(DATUM, 17, 2))).toEqual({ stanje, radnje: [] });
+    });
+
+    it("dvostruko javljanje šalje jedno pitanje", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const prvo = primijeni(stanje, bezRada(oznaka), u(DATUM, 17, 2));
+
+      expect(primijeni(prvo.stanje, bezRada(oznaka), u(DATUM, 17, 3)).radnje).toEqual([]);
+    });
+
+    it("poslije pokrenutog pisanja javljanje ne šalje pitanje", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const pisanje = primijeni(stanje, zavrsio, u(DATUM, 17, 1)).stanje;
+
+      expect(primijeni(pisanje, bezRada(oznaka), u(DATUM, 17, 2)).radnje).toEqual([]);
+    });
+
+    it("provjera iz 22:30 može da pita do 22:45, a ne pred slanje u 23:00", () => {
+      const { stanje, oznaka } = uProvjeri(22, 30);
+
+      expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 22, 44)).radnje).toHaveLength(1);
+      expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 22, 45)).radnje).toEqual([]);
+      expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 23, 0)).radnje).toEqual([]);
+      expect(primijeni(stanje, bezRada(oznaka), u("2030-05-16", 0, 5)).radnje).toEqual([]);
+    });
+  });
+
+  describe("neuspjela provjera", () => {
+    it("koja se ne javi 15 minuta ponavlja se poslije 30 minuta, a pitanja nema", () => {
+      const { stanje } = uProvjeri();
+      const prije = { ...u(DATUM, 17, 14), trenutak: u(DATUM, 17, 15).trenutak - 1 };
+      expect(primijeni(stanje, cron, prije).stanje).toBe(stanje);
+
+      const pala = primijeni(stanje, cron, u(DATUM, 17, 15));
+      expect(pala.radnje).toEqual([]);
+      expect(pala.stanje.provjeraOd).toBeNull();
+
+      expect(primijeni(pala.stanje, cron, u(DATUM, 17, 40)).radnje).toEqual([]);
+      expect(primijeni(pala.stanje, cron, u(DATUM, 17, 45)).radnje).toEqual([
+        { ...POKRENI, oznaka: String(u(DATUM, 17, 45).trenutak) },
+      ]);
+    });
+
+    it("javljeni neuspjeh ne šalje pitanje, a ponavlja se poslije 30 minuta", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const pala = primijeni(stanje, palo(oznaka), u(DATUM, 17, 2));
+
+      expect(pala.radnje).toEqual([]);
+      expect(primijeni(pala.stanje, cron, u(DATUM, 17, 30)).radnje).toEqual([]);
+      expect(primijeni(pala.stanje, cron, u(DATUM, 17, 32)).radnje).toHaveLength(1);
+    });
+
+    it("javljanje poslije roka je neuspjeh, i kad cron još nije stigao", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const prelaz = primijeni(stanje, bezRada(oznaka), u(DATUM, 17, 15));
+
+      expect(prelaz.radnje).toEqual([]);
+      expect(prelaz.stanje.odlozenoDo).toBe(u(DATUM, 17, 45).trenutak);
+    });
+
+    it("nepokrenuta provjera se ponavlja poslije 30 minuta", () => {
+      const { stanje } = primijeni(uProvjeri().stanje, { vrsta: "provjera_nije_pokrenuta" }, u(DATUM, 17, 0));
+
+      expect(stanje).toMatchObject({ provjeraOd: null, odlozenoDo: u(DATUM, 17, 30).trenutak });
+    });
+
+    it("pitanje koje nije stiglo ne čeka odgovor, nego se ponavlja poslije 30 minuta", () => {
+      const { stanje } = primijeni(pitanje(), { vrsta: "pitanje_nije_poslato" }, u(DATUM, 17, 2));
+
+      expect(primijeni(stanje, cron, u(DATUM, 17, 30)).radnje).toEqual([]);
+      expect(primijeni(stanje, cron, u(DATUM, 17, 32)).radnje).toHaveLength(1);
+    });
+  });
+
+  describe("pitanje bez odgovora", () => {
+    it("nema novog pitanja dok nema nove aktivnosti", () => {
+      const pocetno = pitanje();
+
+      for (const sat of [18, 19, 20, 21, 22]) {
+        expect(primijeni(pocetno, cron, u(DATUM, sat, 0)).radnje).toEqual([]);
+      }
+    });
+
+    it("nova aktivnost ponovo otvara put, poslije 60 minuta pauze", () => {
+      const { stanje } = primijeni(pitanje(), aktivnost, u(DATUM, 18, 0));
+
+      expect(primijeni(stanje, cron, u(DATUM, 18, 55)).radnje).toEqual([]);
+      expect(primijeni(stanje, cron, u(DATUM, 19, 0)).radnje).toHaveLength(1);
+    });
+  });
+
+  describe('"Jesam"', () => {
+    it("pokreće pisanje odmah, a prvo odgovara na dugme", () => {
+      const { stanje, radnje } = primijeni(pitanje(), dugme("jesam"), u(DATUM, 17, 5));
+
+      expect(stanje.faza).toBe("pisanje");
+      expect(radnje[0]).toEqual({ vrsta: "odgovori_na_dugme", id: "d1" });
+      expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: DATUM });
+    });
+
+    it("dvostruki pritisak pokreće jedno pisanje", () => {
+      const prvi = primijeni(pitanje(), dugme("jesam"), u(DATUM, 17, 5));
+      const drugi = primijeni(prvi.stanje, dugme("jesam"), u(DATUM, 17, 5));
+
+      expect(drugi.stanje).toBe(prvi.stanje);
+      expect(drugi.radnje).not.toContainEqual({ vrsta: "pokreni_pisanje", datum: DATUM });
+      expect(drugi.radnje[0]).toEqual({ vrsta: "odgovori_na_dugme", id: "d1" });
+    });
+
+    it("na zatvoren dan ne pokreće pisanje", () => {
+      const { radnje } = primijeni(dan("zatvoren"), dugme("jesam"), u(DATUM, 18, 0));
+
+      expect(radnje).not.toContainEqual({ vrsta: "pokreni_pisanje", datum: DATUM });
+    });
+  });
+
+  describe('"Nije"', () => {
+    const odgovoreno = () => primijeni(pitanje(), dugme("nije"), u(DATUM, 17, 10));
+
+    it("odgovara na dugme i ne pokreće ništa", () => {
+      expect(odgovoreno().radnje).toEqual([
+        { vrsta: "odgovori_na_dugme", id: "d1", tekst: "U redu, pitaću te kasnije." },
+      ]);
+    });
+
+    it("bez aktivnosti: nova provjera za 30 minuta", () => {
+      const { stanje } = odgovoreno();
+
+      expect(primijeni(stanje, cron, u(DATUM, 17, 35)).radnje).toEqual([]);
+      expect(primijeni(stanje, cron, u(DATUM, 17, 40)).radnje).toHaveLength(1);
+    });
+
+    it("sa aktivnošću: opet važi 60 minuta pauze", () => {
+      const { stanje } = primijeni(odgovoreno().stanje, aktivnost, u(DATUM, 17, 20));
+
+      expect(primijeni(stanje, cron, u(DATUM, 17, 40)).radnje).toEqual([]);
+      expect(primijeni(stanje, cron, u(DATUM, 18, 15)).radnje).toEqual([]);
+      expect(primijeni(stanje, cron, u(DATUM, 18, 20)).radnje).toHaveLength(1);
+    });
+
+    it("provjeru koja je u toku odbacuje, da pitanje ne stigne odmah poslije odgovora", () => {
+      const { stanje, oznaka } = uProvjeri();
+      const poslije = primijeni(stanje, dugme("nije"), u(DATUM, 17, 1)).stanje;
+
+      expect(primijeni(poslije, bezRada(oznaka), u(DATUM, 17, 2)).radnje).toEqual([]);
+    });
+
+    it.each(["pisanje", "bez_poruke", "neuspjeh", "zatvoren"] as const)("u fazi %s ne mijenja stanje", (faza) => {
+      const pocetno = dan(faza);
+      const { stanje, radnje } = primijeni(pocetno, dugme("nije"), u(DATUM, 18, 0));
+
+      expect(stanje).toBe(pocetno);
+      expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "U redu." }]);
+    });
+  });
+
+  describe("staro dugme", () => {
+    it.each(["jesam", "nije"] as const)('"%s" od juče samo odgovara da je pitanje isteklo', (odgovor) => {
+      const pocetno = aktivanU(16);
+      const { stanje, radnje } = primijeni(pocetno, dugme(odgovor, "2030-05-14"), u(DATUM, 17, 0));
+
+      expect(stanje).toBe(pocetno);
+      expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
+    });
+
+    it("minut poslije ponoći je već staro", () => {
+      const { radnje } = primijeni(noviDan("2030-05-16"), dugme("jesam"), u("2030-05-16", 0, 1));
+
+      expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
+    });
+  });
+
+  it("u 23:00 pisanje kreće i ako pitanje još čeka odgovor", () => {
+    const { stanje, radnje } = primijeni(pitanje(), cron, u(DATUM, 23, 0));
+
+    expect(stanje.faza).toBe("pisanje");
+    expect(radnje).toEqual([{ vrsta: "pokreni_pisanje", datum: DATUM }]);
   });
 });
 
