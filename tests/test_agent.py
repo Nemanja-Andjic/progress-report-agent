@@ -665,6 +665,19 @@ def test_svi_pokusaji_groka_staju_u_rok_workflowa(agent):
     assert ukupno < 25 * 60
 
 
+def test_uputstvo_trazi_detalj_koji_ne_ponavlja_kratak_opis(agent):
+    # U probnom izvještaju je detalj kratke stavke bio ista rečenica kao kratak opis.
+    assert "kažu više od kratkog opisa" in agent.UPUTSTVO_GROKU
+    assert "nikad ista rečenica kao kratak_opis" in agent.UPUTSTVO_GROKU
+
+
+def test_uputstvo_zabranjuje_napomene_i_zastarjelo_stanje_iz_pr_a(agent):
+    # U probnom izvještaju je iz PR-a prepisano stanje koje je kasnije zastarjelo.
+    assert "Stavka opisuje samo šta je urađeno" in agent.UPUTSTVO_GROKU
+    for zabranjeno in ("napomene", "planove", "nije provjereno", "ne pokreći", "recenzenta"):
+        assert zabranjeno in agent.UPUTSTVO_GROKU
+
+
 def test_isteklo_vrijeme_pri_povezivanju_se_ne_vodi_kao_greska_mreze(agent, monkeypatch):
     # urllib grešku pri povezivanju umota u URLError, a grešku pri čekanju odgovora ne.
     def urlopen(*_, **__):
