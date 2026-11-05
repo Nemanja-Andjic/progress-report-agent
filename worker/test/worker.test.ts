@@ -1354,3 +1354,119 @@ describe("neuspjelo slanje poruke", () => {
     expect(porukeNaChat(CHAT_MENTOR)).toEqual([]);
   });
 });
+
+describe("stanje dana", () => {
+  function stanjeZahtjev(datum: string | null = DANAS, kljuc: string | null = KLJUC_ACTIONS, metoda = "GET"): Request {
+    const zaglavlja: Record<string, string> = kljuc ? { Authorization: `Bearer ${kljuc}` } : {};
+    const upit = datum === null ? "" : `?datum=${encodeURIComponent(datum)}`;
+    return new Request(`https://worker.test/actions/stanje${upit}`, { method: metoda, headers: zaglavlja });
+  }
+  const stanje = async (datum = DANAS) => (await pozovi(stanjeZahtjev(datum))).json();
+
+  it.each([
+    ["bez ključa", null],
+    ["sa pogrešnim ključem", "pogresan"],
+    ["sa ključem hooka", KLJUC_HOOKA],
+    ["sa tajnom webhook-a", TAJNA_WEBHOOKA],
+  ])("odbija zahtjev %s, a odgovor ne otkriva stanje", async (_ime, kljuc) => {
+    await zavrsio();
+    await gotovo("Tekst izvještaja");
+
+    const odgovor = await pozovi(stanjeZahtjev(DANAS, kljuc));
+
+    expect(odgovor.status).toBe(401);
+    expect(await odgovor.text()).toBe("");
+  });
+
+  it("bez podešenog ključa na Workeru odbija svaki zahtjev", async () => {
+    const odgovor = await pozovi(stanjeZahtjev(), { ...ENV, KLJUC_ACTIONS: undefined });
+
+    expect(odgovor.status).toBe(401);
+  });
+
+  it.each([
+    ["bez datuma", null],
+    ["sa datumom koji ne postoji", "2030-13-45"],
+    ["sa datumom u drugom obliku", "15.5.2030."],
+    ["sa praznim datumom", ""],
+  ])("odbija zahtjev %s", async (_ime, datum) => {
+    expect((await pozovi(stanjeZahtjev(datum))).status).toBe(400);
+  });
+
+  it("radi samo na GET", async () => {
+    expect((await pozovi(stanjeZahtjev(DANAS, KLJUC_ACTIONS, "POST"))).status).toBe(404);
+  });
+
+  it("zatvoren dan", async () => {
+    await zavrsio();
+    await gotovo("Tekst izvještaja");
+
+    expect(await stanje()).toEqual({ datum: DANAS, faza: "zatvoren" });
+  });
+
+  it("dan bez rada je zatvoren", async () => {
+    await zavrsio();
+    await gotovo("Danas nema zabilježenog rada");
+
+    expect(await stanje()).toEqual({ datum: DANAS, faza: "zatvoren" });
+  });
+
+  it("dan koji Worker nikad nije vidio je otvoren, a ruta mu ne pravi red u bazi", async () => {
+    expect(await stanje("2030-05-14")).toEqual({ datum: "2030-05-14", faza: "otvoren" });
+
+    const { results } = await bazniEnv.DB.prepare("SELECT datum FROM dani").all();
+    expect(results).toEqual([]);
+  });
+
+  it("dan sa neuspjehom nije zatvoren", async () => {
+    await zavrsio();
+    await neuspjeh();
+
+    expect(await stanje()).toEqual({ datum: DANAS, faza: "neuspjeh" });
+  });
+
+  it("dan na kom pisanje još traje nije zatvoren", async () => {
+    await zavrsio();
+
+    expect(await stanje()).toEqual({ datum: DANAS, faza: "pisanje" });
+  });
+
+  it("dan bez poslate poruke nije zatvoren, a tekst izvještaja ne izlazi iz baze", async () => {
+    mentorPada = true;
+    const tekst = "Tekst izvještaja koji čeka slanje";
+    await zavrsio();
+    await gotovo(tekst, { ...ENV, PROBNI_REZIM: "iskljucen" });
+
+    const odgovor = await pozovi(stanjeZahtjev());
+    const telo = await odgovor.text();
+
+    expect(JSON.parse(telo)).toEqual({ datum: DANAS, faza: "bez_poruke" });
+    expect(telo).not.toContain(tekst);
+  });
+
+  it("pitanje za stanje ne mijenja dan, ne šalje poruke i ne pokreće workflow", async () => {
+    await zavrsio();
+    const prijePoruke = poruke.length;
+    const prijePokretanja = pokretanja.length;
+
+    await stanje();
+    await stanje();
+
+    expect(poruke).toHaveLength(prijePoruke);
+    expect(pokretanja).toHaveLength(prijePokretanja);
+    expect(await stanje()).toEqual({ datum: DANAS, faza: "pisanje" });
+    expect((await gotovo("Tekst")).status).toBe(200);
+    expect(await stanje()).toEqual({ datum: DANAS, faza: "zatvoren" });
+  });
+
+  it("jutro poslije: rezultat stigao poslije ponoći zatvara juče, a današnja aktivnost ga ne dira", async () => {
+    await zavrsio();
+    vi.setSystemTime(new Date("2030-05-15T22:30:00Z"));
+    await gotovo("Tekst izvještaja");
+    vi.setSystemTime(new Date("2030-05-16T05:00:00Z"));
+    await aktivnost();
+
+    expect(await stanje(DANAS)).toEqual({ datum: DANAS, faza: "zatvoren" });
+    expect(await stanje("2030-05-16")).toEqual({ datum: "2030-05-16", faza: "otvoren" });
+  });
+});

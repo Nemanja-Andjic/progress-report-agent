@@ -363,6 +363,17 @@ async function provjera(zahtjev: Request, env: Env): Promise<Response> {
   return new Response();
 }
 
+// Samo čita, a odgovor nosi samo datum i fazu, jer tekst u bazi može biti sadržaj izvještaja.
+async function stanjeDana(zahtjev: Request, env: Env): Promise<Response> {
+  if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_ACTIONS))) return new Response(null, { status: 401 });
+
+  const datum = new URL(zahtjev.url).searchParams.get("datum");
+  if (!ispravanDatum(datum)) return new Response(null, { status: 400 });
+
+  const { stanje } = await ucitajDan(env.DB, datum);
+  return Response.json({ datum, faza: stanje.faza });
+}
+
 // Tijelo zahtjeva se ne čita, a vrijeme je po satu Workera: zahtjev ne može da unese ništa drugo (ADR 0005).
 async function aktivnost(zahtjev: Request, env: Env): Promise<Response> {
   if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_HOOKA))) return new Response(null, { status: 401 });
@@ -393,6 +404,7 @@ export default {
     if (zahtjev.method === "POST" && pathname === "/telegram") return telegram(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/rezultat") return rezultat(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/provjera") return provjera(zahtjev, env);
+    if (zahtjev.method === "GET" && pathname === "/actions/stanje") return stanjeDana(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/aktivnost") return aktivnost(zahtjev, env);
     return new Response(null, { status: 404 });
   },

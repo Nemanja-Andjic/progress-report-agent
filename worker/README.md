@@ -2,7 +2,7 @@
 
 Prima "završio" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
 
-Jutarnja provjera stiže u #30.
+Jutarnju provjeru radi `jutarnja-provjera.yml` u privatnom repou, a ne Worker, da bi otkrila i kvar Workera. Od Workera samo čita stanje dana (`GET /actions/stanje`).
 
 ## Kako radi
 
@@ -116,6 +116,22 @@ Traži isti ključ kao `/actions/rezultat`. Poziva ga `provjera-svjezeg-rada.yml
 |---|---|
 | 200 | primljeno. Važi i za dvostruko i zakasnilo javljanje, koje ništa ne mijenja |
 | 400 | tijelo nije ispravno, a stanje dana se ne mijenja |
+| 401 | fali ključ ili nije ispravan |
+
+### `GET /actions/stanje?datum=2030-05-15`
+
+Traži isti ključ kao `/actions/rezultat`. Poziva ga `jutarnja-provjera.yml`. Ruta samo čita, pa ne mijenja dan, ne šalje poruke i ne pravi red u bazi.
+
+```json
+{ "datum": "2030-05-15", "faza": "zatvoren" }
+```
+
+Odgovor nosi samo datum i fazu, nikad tekst poruke. `faza` je jedna od faza iz tabele iznad. Dan je zatvoren samo u fazi `zatvoren`, a tu je i dan bez rada, jer je mentor dobio "Danas nema zabilježenog rada". Dan koji Worker nije vidio, npr. jer mu cron nije radio, ima fazu `otvoren`.
+
+| Status | Značenje |
+|---|---|
+| 200 | stanje je u tijelu |
+| 400 | `datum` fali ili nije ispravan |
 | 401 | fali ključ ili nije ispravan |
 
 ### `POST /aktivnost`
