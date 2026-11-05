@@ -36,7 +36,7 @@ Veće odluke su u ADR 0004, 0005 i 0006. Ovdje su vrijednosti koje se lako mijen
 ## Za spec i tickete
 
 - Rizik za spec: nije potvrđeno da hook na kraju odgovora može natjerati Claude-a da napiše bilješku. To je viđeno samo posredno, u dokumentaciji za `SubagentStop`. Ticket za taj hook počinje kratkom probom.
-- Otvoreno za spec: kako Actions javlja Workeru rezultat provjere prije pitanja. Isti put treba i jutarnjoj provjeri, koja od Workera traži stanje dana.
+- Rezultat provjere prije pitanja Actions javlja Workeru preko `POST /actions/provjera` (#29). Otvoreno za spec: kako jutarnja provjera od Workera traži stanje dana.
 - #16 ostaje otvoren. Zatvara se zajedno sa specom #5, kad prvi pravi izvještaj stigne mentoru i on se prijavi na sajt.
 
 ## Stanje prije planiranja

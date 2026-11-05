@@ -35,17 +35,24 @@ let pokretanja: { url: string; token: string | null; telo: unknown }[];
 let telegramPada: boolean;
 let mentorPada: boolean;
 let githubPada: boolean;
+let dugmad: unknown[];
+let odgovoriNaDugmad: { id: string; tekst?: string }[];
 
 async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promise<Response> {
   const zahtjev = new Request(ulaz, opcije);
   const adresa = new URL(zahtjev.url);
   if (adresa.hostname === "api.telegram.org") {
-    if (telegramPada || adresa.pathname !== `/bot${TOKEN_BOTA}/sendMessage`) {
-      return new Response("{}", { status: 500 });
+    if (telegramPada) return new Response("{}", { status: 500 });
+    if (adresa.pathname === `/bot${TOKEN_BOTA}/answerCallbackQuery`) {
+      const telo = (await zahtjev.json()) as { callback_query_id: string; text?: string };
+      odgovoriNaDugmad.push({ id: telo.callback_query_id, tekst: telo.text });
+      return Response.json({ ok: true });
     }
-    const telo = (await zahtjev.json()) as { chat_id: string; text: string };
+    if (adresa.pathname !== `/bot${TOKEN_BOTA}/sendMessage`) return new Response("{}", { status: 500 });
+    const telo = (await zahtjev.json()) as { chat_id: string; text: string; reply_markup?: unknown };
     if (mentorPada && Number(telo.chat_id) === CHAT_MENTOR) return new Response("{}", { status: 403 });
     poruke.push({ chat: Number(telo.chat_id), tekst: telo.text });
+    if (telo.reply_markup) dugmad.push(telo.reply_markup);
     return Response.json({ ok: true });
   }
   if (adresa.hostname === "api.github.com") {
@@ -88,7 +95,7 @@ function aktivnostZahtjev(kljuc: string | null = KLJUC_HOOKA, telo?: string): Re
 }
 
 const aktivnost = (env?: Partial<Env>) => pozovi(aktivnostZahtjev(), env);
-// Jedini izuzetak od pravila da testovi ne gledaju u bazu: dok #29 ne stigne, ovo vrijeme se spolja ne vidi.
+// Jedini izuzetak od pravila da testovi ne gledaju u bazu: ovo vrijeme se spolja vidi samo posredno, kroz pitanje.
 const posljednjaAktivnost = (datum = DANAS) =>
   bazniEnv.DB.prepare("SELECT posljednja_aktivnost AS vrijeme FROM dani WHERE datum = ?1")
     .bind(datum)
@@ -114,6 +121,8 @@ beforeEach(async () => {
   telegramPada = false;
   mentorPada = false;
   githubPada = false;
+  dugmad = [];
+  odgovoriNaDugmad = [];
   vi.useFakeTimers({ toFake: ["Date"], now: PODNE });
   vi.spyOn(globalThis, "fetch").mockImplementation(lazniSvijet);
 });
@@ -121,6 +130,498 @@ beforeEach(async () => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("pitanje o završetku", () => {
+  const TEKST_PITANJA = "Da li si završio za danas?";
+  const sat = (vrijeme: string) => vi.setSystemTime(new Date(`2030-05-15T${vrijeme}:00Z`));
+  const cronUTC = (vrijeme: string, env?: Partial<Env>) => cronU(`2030-05-15T${vrijeme}:00Z`, env);
+  const pokretanjaWorkflowa = (ime: string) => pokretanja.filter((pokretanje) => pokretanje.url.includes(ime));
+  const provjere = () => pokretanjaWorkflowa("provjera-svjezeg-rada.yml");
+  const pisanja = () => pokretanjaWorkflowa("pisanje-i-objava.yml");
+  const oznaka = () => (provjere().at(-1)?.telo as { inputs: { oznaka: string } }).inputs.oznaka;
+  const pitanja = () => poruke.filter((poruka) => poruka.tekst === TEKST_PITANJA);
+
+  function provjeraZahtjev(telo: unknown, kljuc: string | null = KLJUC_ACTIONS): Request {
+    const zaglavlja: Record<string, string> = kljuc ? { Authorization: `Bearer ${kljuc}` } : {};
+    return new Request("https://worker.test/actions/provjera", {
+      method: "POST",
+      headers: zaglavlja,
+      body: typeof telo === "string" ? telo : JSON.stringify(telo),
+    });
+  }
+  const javi = (ishod: string, vrijeme?: string) =>
+    pozovi(provjeraZahtjev({ datum: DANAS, oznaka: oznaka(), ishod, vrijeme }));
+
+  function dugmeZahtjev(data: string, chat = CHAT_NEMANJA, tajna: string | null = TAJNA_WEBHOOKA): Request {
+    const zaglavlja: Record<string, string> = tajna ? { "X-Telegram-Bot-Api-Secret-Token": tajna } : {};
+    return new Request("https://worker.test/telegram", {
+      method: "POST",
+      headers: zaglavlja,
+      body: JSON.stringify({
+        update_id: 2,
+        callback_query: { id: "dugme-1", data, from: { id: chat }, message: { message_id: 9, chat: { id: chat } } },
+      }),
+    });
+  }
+  const pritisni = (odgovor: "jesam" | "nije", datum = DANAS) => pozovi(dugmeZahtjev(`pitanje:${datum}:${odgovor}`));
+
+  // Aktivnost u 16:00 po lokalnom, provjera u 17:00, a javljanje u 17:02.
+  async function doProvjere() {
+    sat("14:00");
+    await aktivnost();
+    await cronUTC("15:00");
+    expect(provjere()).toHaveLength(1);
+  }
+  async function doPitanja() {
+    await doProvjere();
+    sat("15:02");
+    await javi("nema-svjezeg-rada");
+    expect(pitanja()).toHaveLength(1);
+  }
+
+  describe("granice i uslovi", () => {
+    it.each([
+      ["15:55 po lokalnom je rano", "13:55", 0],
+      ["16:00 po lokalnom je prvi trenutak", "14:00", 1],
+      ["22:30 po lokalnom je posljednji trenutak", "20:30", 1],
+      ["22:35 po lokalnom je kasno", "20:35", 0],
+    ])("%s", async (_ime, vrijeme, broj) => {
+      sat("12:00");
+      await aktivnost();
+
+      await cronUTC(vrijeme);
+
+      expect(provjere()).toHaveLength(broj);
+      expect(poruke).toEqual([]);
+    });
+
+    it("pokreće workflow provjere na main, sa datumom i oznakom, a pitanja još nema", async () => {
+      await doProvjere();
+
+      expect(provjere()[0].url).toBe(
+        "https://api.github.com/repos/Nemanja-Andjic/progress-report-izvjestaji/actions/workflows/provjera-svjezeg-rada.yml/dispatches",
+      );
+      expect(provjere()[0].token).toBe(`Bearer ${TOKEN_GITHUBA}`);
+      expect(provjere()[0].telo).toEqual({
+        ref: "main",
+        inputs: { datum: DANAS, oznaka: String(Date.parse("2030-05-15T15:00:00Z")) },
+      });
+      expect(pitanja()).toEqual([]);
+    });
+
+    it("pauza kraća od 60 minuta ne pokreće provjeru", async () => {
+      sat("14:01");
+      await aktivnost();
+
+      await cronUTC("15:00");
+      expect(provjere()).toEqual([]);
+
+      await cronUTC("15:05");
+      expect(provjere()).toHaveLength(1);
+    });
+
+    it("dan bez signala iz hooka nema ni provjeru ni pitanje, a pokriva ga slanje u 23:00", async () => {
+      for (const vrijeme of ["14:00", "16:00", "18:00", "20:30"]) await cronUTC(vrijeme);
+      expect(provjere()).toEqual([]);
+      expect(poruke).toEqual([]);
+
+      await cronUTC("21:00");
+      expect(pisanja()).toHaveLength(1);
+    });
+
+    it("zatvoren dan nema provjeru", async () => {
+      sat("14:00");
+      await zavrsio();
+      await gotovo("Tekst");
+      await aktivnost();
+
+      await cronUTC("15:00");
+
+      expect(provjere()).toEqual([]);
+    });
+
+    it("dan sa neuspjehom nema provjeru", async () => {
+      sat("13:00");
+      await zavrsio();
+      await neuspjeh();
+      await aktivnost();
+
+      await cronUTC("15:00");
+
+      expect(provjere()).toEqual([]);
+    });
+
+    it("dok pisanje traje nema provjere", async () => {
+      sat("14:00");
+      await aktivnost();
+      sat("15:00");
+      await zavrsio();
+
+      await cronUTC("15:05");
+
+      expect(provjere()).toEqual([]);
+    });
+
+    it("dva cron-a u isto vrijeme pokreću jednu provjeru", async () => {
+      sat("14:00");
+      await aktivnost();
+      sat("15:00");
+
+      await Promise.all([cron(), cron()]);
+
+      expect(provjere()).toHaveLength(1);
+    });
+  });
+
+  describe("rezultat provjere", () => {
+    it("bez svježeg rada Nemanja dobija pitanje sa dugmadima, a mentor ništa", async () => {
+      await doPitanja();
+
+      expect(pitanja()).toEqual([{ chat: CHAT_NEMANJA, tekst: TEKST_PITANJA }]);
+      expect(dugmad).toEqual([
+        {
+          inline_keyboard: [
+            [
+              { text: "Jesam", callback_data: `pitanje:${DANAS}:jesam` },
+              { text: "Nije", callback_data: `pitanje:${DANAS}:nije` },
+            ],
+          ],
+        },
+      ]);
+    });
+
+    it("sa svježim radom odlaže pitanje 60 minuta od tog rada, a posljednja aktivnost ostaje", async () => {
+      await doProvjere();
+      sat("15:02");
+      const prije = await posljednjaAktivnost();
+
+      expect((await javi("svjez-rad", "2030-05-15T16:40+02:00")).status).toBe(200);
+      expect(pitanja()).toEqual([]);
+      expect(await posljednjaAktivnost()).toBe(prije);
+
+      await cronUTC("15:35");
+      expect(provjere()).toHaveLength(1);
+
+      await cronUTC("15:40");
+      expect(provjere()).toHaveLength(2);
+
+      await javi("svjez-rad", "2030-05-15T16:40+02:00");
+      expect(pitanja()).toHaveLength(1);
+    });
+
+    it("rad stariji od 60 minuta ne sprečava pitanje", async () => {
+      await doProvjere();
+      sat("15:02");
+
+      await javi("svjez-rad", "2030-05-15T09:15+02:00");
+
+      expect(pitanja()).toHaveLength(1);
+    });
+
+    it("dvostruko javljanje šalje jedno pitanje", async () => {
+      await doProvjere();
+      sat("15:02");
+      const trenutna = oznaka();
+      const telo = { datum: DANAS, oznaka: trenutna, ishod: "nema-svjezeg-rada" };
+
+      await Promise.all([pozovi(provjeraZahtjev(telo)), pozovi(provjeraZahtjev(telo))]);
+      await pozovi(provjeraZahtjev(telo));
+
+      expect(pitanja()).toHaveLength(1);
+    });
+
+    it("javljanje bez pokrenute provjere ne šalje pitanje", async () => {
+      sat("15:00");
+      const odgovor = await pozovi(provjeraZahtjev({ datum: DANAS, oznaka: "123", ishod: "nema-svjezeg-rada" }));
+
+      expect(odgovor.status).toBe(200);
+      expect(poruke).toEqual([]);
+    });
+
+    it.each([
+      ["nečitljivo tijelo", "nije json"],
+      ["nepoznat ishod", { datum: DANAS, oznaka: "1", ishod: "mozda" }],
+      ["bez oznake", { datum: DANAS, ishod: "nema-svjezeg-rada" }],
+      ["bez datuma", { oznaka: "1", ishod: "nema-svjezeg-rada" }],
+      ["svjež rad bez vremena", { datum: DANAS, oznaka: "1", ishod: "svjez-rad" }],
+      ["vrijeme bez zone", { datum: DANAS, oznaka: "1", ishod: "svjez-rad", vrijeme: "2030-05-15T16:40" }],
+      ["nečitljivo vrijeme", { datum: DANAS, oznaka: "1", ishod: "svjez-rad", vrijeme: "juče" }],
+    ])("odbija %s", async (_ime, telo) => {
+      expect((await pozovi(provjeraZahtjev(telo))).status).toBe(400);
+    });
+
+    it.each([
+      ["bez ključa", null],
+      ["sa pogrešnim ključem", "pogresan"],
+      ["sa ključem hooka", KLJUC_HOOKA],
+      ["sa tajnom webhook-a", TAJNA_WEBHOOKA],
+    ])("ruta odbija zahtjev %s i ne šalje pitanje", async (_ime, kljuc) => {
+      await doProvjere();
+      sat("15:02");
+
+      const odgovor = await pozovi(provjeraZahtjev({ datum: DANAS, oznaka: oznaka(), ishod: "nema-svjezeg-rada" }, kljuc));
+
+      expect(odgovor.status).toBe(401);
+      expect(pitanja()).toEqual([]);
+    });
+  });
+
+  describe("neuspjela provjera", () => {
+    it("koja se ne javi 15 minuta ponavlja se poslije 30 minuta, bez pitanja", async () => {
+      await doProvjere();
+
+      await cronUTC("15:10");
+      await cronUTC("15:15");
+      await cronUTC("15:40");
+      expect(provjere()).toHaveLength(1);
+      expect(poruke).toEqual([]);
+
+      await cronUTC("15:45");
+      expect(provjere()).toHaveLength(2);
+      expect(poruke).toEqual([]);
+    });
+
+    it("javljanje poslije roka ne šalje pitanje", async () => {
+      await doProvjere();
+      sat("15:15");
+
+      await javi("nema-svjezeg-rada");
+
+      expect(pitanja()).toEqual([]);
+    });
+
+    it("javljanje stare provjere ne odlučuje umjesto nove", async () => {
+      await doProvjere();
+      const stara = oznaka();
+      await cronUTC("15:15");
+      await cronUTC("15:45");
+      sat("15:46");
+
+      await pozovi(provjeraZahtjev({ datum: DANAS, oznaka: stara, ishod: "nema-svjezeg-rada" }));
+      expect(pitanja()).toEqual([]);
+
+      await javi("nema-svjezeg-rada");
+      expect(pitanja()).toHaveLength(1);
+    });
+
+    it("javljeni neuspjeh ne šalje pitanje, a ne šalje ni tekst iz zahtjeva", async () => {
+      await doProvjere();
+      sat("15:02");
+
+      await pozovi(provjeraZahtjev({ datum: DANAS, oznaka: oznaka(), ishod: "neuspjeh", razlog: "Tajna vrijednost" }));
+
+      expect(poruke).toEqual([]);
+      await cronUTC("15:30");
+      expect(provjere()).toHaveLength(1);
+      await cronUTC("15:35");
+      expect(provjere()).toHaveLength(2);
+    });
+
+    it("workflow koji GitHub ne pokrene ponavlja se poslije 30 minuta", async () => {
+      sat("14:00");
+      await aktivnost();
+      githubPada = true;
+      await cronUTC("15:00");
+      githubPada = false;
+
+      await cronUTC("15:25");
+      expect(provjere()).toEqual([]);
+
+      await cronUTC("15:30");
+      expect(provjere()).toHaveLength(1);
+    });
+
+    it("pitanje koje Telegram ne primi ne blokira sljedeće", async () => {
+      await doProvjere();
+      sat("15:02");
+      telegramPada = true;
+      expect((await javi("nema-svjezeg-rada")).status).toBe(200);
+      telegramPada = false;
+
+      await cronUTC("15:35");
+      expect(provjere()).toHaveLength(2);
+      sat("15:36");
+      await javi("nema-svjezeg-rada");
+      expect(pitanja()).toHaveLength(1);
+    });
+  });
+
+  describe("pitanje bez odgovora", () => {
+    it("nema novog pitanja ni provjere dok se ne pojavi nova aktivnost", async () => {
+      await doPitanja();
+
+      for (const vrijeme of ["16:00", "17:00", "18:00", "20:30"]) await cronUTC(vrijeme);
+
+      expect(provjere()).toHaveLength(1);
+      expect(pitanja()).toHaveLength(1);
+    });
+
+    it("nova aktivnost otvara put novom pitanju, poslije 60 minuta pauze", async () => {
+      await doPitanja();
+      sat("16:00");
+      await aktivnost();
+
+      await cronUTC("16:55");
+      expect(provjere()).toHaveLength(1);
+
+      await cronUTC("17:00");
+      sat("17:01");
+      await javi("nema-svjezeg-rada");
+      expect(pitanja()).toHaveLength(2);
+    });
+  });
+
+  describe('"Jesam"', () => {
+    it("pokreće pisanje odmah i odgovara na dugme", async () => {
+      await doPitanja();
+      sat("15:10");
+
+      expect((await pritisni("jesam")).status).toBe(200);
+
+      expect(pisanja().map((pokretanje) => pokretanje.telo)).toEqual([{ ref: "main", inputs: { datum: DANAS } }]);
+      expect(odgovoriNaDugmad[0].id).toBe("dugme-1");
+      expect(poruke.at(-1)?.tekst).toBe("Krećem sa pisanjem izvještaja.");
+
+      await gotovo("Tekst");
+      expect(poruke.at(-1)?.tekst).toBe("(proba)\n\nTekst");
+    });
+
+    it("dvostruki pritisak pokreće jedno pisanje, a oba dobijaju odgovor", async () => {
+      await doPitanja();
+
+      await pritisni("jesam");
+      await pritisni("jesam");
+
+      expect(pisanja()).toHaveLength(1);
+      expect(odgovoriNaDugmad).toHaveLength(2);
+    });
+
+    it("pritisci u isto vrijeme pokreću jedno pisanje", async () => {
+      await doPitanja();
+
+      await Promise.all([pritisni("jesam"), pritisni("jesam"), pritisni("jesam")]);
+
+      expect(pisanja()).toHaveLength(1);
+    });
+
+    it('dugme i "završio" u isto vrijeme pokreću jedno pisanje', async () => {
+      await doPitanja();
+
+      await Promise.all([pritisni("jesam"), zavrsio()]);
+
+      expect(pisanja()).toHaveLength(1);
+    });
+
+    it("javljanje provjere poslije pritiska ne šalje pitanje", async () => {
+      await doProvjere();
+      sat("15:01");
+      await pritisni("jesam");
+
+      await javi("nema-svjezeg-rada");
+
+      expect(pitanja()).toEqual([]);
+    });
+
+    it("poslije zatvorenog dana odgovara da je izvještaj već poslat", async () => {
+      await doPitanja();
+      await pritisni("jesam");
+      await gotovo("Tekst");
+
+      await pritisni("jesam");
+
+      expect(pisanja()).toHaveLength(1);
+      expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+    });
+  });
+
+  describe('"Nije"', () => {
+    it("bez aktivnosti: novo pitanje za 30 minuta", async () => {
+      await doPitanja();
+      sat("15:10");
+
+      await pritisni("nije");
+      expect(pisanja()).toEqual([]);
+      expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "U redu, pitaću te kasnije." }]);
+
+      await cronUTC("15:35");
+      expect(provjere()).toHaveLength(1);
+
+      await cronUTC("15:40");
+      expect(provjere()).toHaveLength(2);
+      sat("15:41");
+      await javi("nema-svjezeg-rada");
+      expect(pitanja()).toHaveLength(2);
+    });
+
+    it("sa aktivnošću: opet važi 60 minuta pauze", async () => {
+      await doPitanja();
+      sat("15:10");
+      await pritisni("nije");
+      sat("15:20");
+      await aktivnost();
+
+      await cronUTC("15:40");
+      await cronUTC("16:15");
+      expect(provjere()).toHaveLength(1);
+
+      await cronUTC("16:20");
+      expect(provjere()).toHaveLength(2);
+    });
+  });
+
+  describe("staro dugme", () => {
+    it.each(["jesam", "nije"] as const)('"%s" sa jučerašnjeg pitanja samo dobija odgovor da je isteklo', async (odgovor) => {
+      await pritisni(odgovor, "2030-05-14");
+
+      expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "Pitanje je isteklo." }]);
+      expect(pokretanja).toEqual([]);
+      expect(poruke).toEqual([]);
+    });
+
+    it("pitanje iz 22:40 poslije ponoći više ne pokreće pisanje", async () => {
+      sat("19:30");
+      await aktivnost();
+      await cronUTC("20:30");
+      sat("20:40");
+      await javi("nema-svjezeg-rada");
+      vi.setSystemTime(new Date("2030-05-15T22:01:00Z"));
+
+      await pritisni("jesam");
+
+      expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "Pitanje je isteklo." }]);
+      expect(pisanja()).toEqual([]);
+    });
+
+    it("nepoznati podaci na dugmetu ne pokreću ništa", async () => {
+      await pozovi(dugmeZahtjev("nesto-drugo"));
+
+      expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "Pitanje je isteklo." }]);
+      expect(pokretanja).toEqual([]);
+    });
+  });
+
+  describe("tuđe dugme", () => {
+    it.each([
+      ["tuđeg", CHAT_TUDJI],
+      ["mentorovog", CHAT_MENTOR],
+    ])("sa %s chata se ignoriše, bez odgovora", async (_ime, chat) => {
+      await doPitanja();
+
+      const odgovor = await pozovi(dugmeZahtjev(`pitanje:${DANAS}:jesam`, chat));
+
+      expect(odgovor.status).toBe(200);
+      expect(odgovoriNaDugmad).toEqual([]);
+      expect(pisanja()).toEqual([]);
+    });
+
+    it("bez tajne webhook-a se odbija", async () => {
+      const odgovor = await pozovi(dugmeZahtjev(`pitanje:${DANAS}:jesam`, CHAT_NEMANJA, null));
+
+      expect(odgovor.status).toBe(401);
+      expect(pisanja()).toEqual([]);
+    });
+  });
 });
 
 describe("put od završio do poruke", () => {
