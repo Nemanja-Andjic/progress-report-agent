@@ -5,7 +5,7 @@ compatibility_date = "2026-11-01"
 # Sve što nije "iskljucen" znači da je probni režim uključen. wrangler deploy ovu vrijednost
 # prepisuje preko one na Cloudflare-u, pa se isključuje samo ovdje, u #32.
 [vars]
-PROBNI_REZIM = "ukljucen"
+PROBNI_REZIM = "iskljucen"
 
 # Po UTC-u. Lokalno vrijeme Worker računa sam, pa 23:00 ne zavisi od ljetnjeg i zimskog vremena.
 [triggers]
