@@ -9,10 +9,10 @@ Tarik, osoba kojoj su izvještaji namijenjeni.
 
 **Agent**:
 Program koji sam sastavlja i objavljuje izvještaje, bez Nemanjine ruke.
-_Izbjegavaj_: bot (bot je samo Telegram nalog preko kog agent šalje poruke)
+_Izbjegavaj_: bot (bot je samo Telegram nalog preko kog agent šalje poruke i odgovara na pitanja o radu)
 
 **Izvještaj**:
-Pregled rada za jedan dan. Nosi datum dana kad je napisan i sastoji se od spiska stavki.
+Pregled rada za jedan radni dan. Nosi datum radnog dana i sastoji se od spiska stavki.
 _Izbjegavaj_: dnevnik, report
 
 **Ručno ispravljen izvještaj**:
@@ -25,7 +25,7 @@ Izvještaj koji je čovjek napisao od nule, bez agenta. Nosi samo oznaku "napisa
 Vrijeme koje izvještaj pokriva: od prethodnog izvještaja do trenutka pisanja, a ne kalendarski dan.
 
 **Dan bez rada**:
-Dan u kom period nema nijednu stavku. Za njega se ne pravi izvještaj, a mentor dobija samo kratko obavještenje.
+Radni dan u kom period nema nijednu stavku. Za njega se ne pravi izvještaj, a mentor dobija samo kratko obavještenje. Utvrđuje se po pravilu za samostalno slanje, najranije u 23:40.
 
 **Stavka**:
 Jedna urađena stvar u izvještaju. Ima broj, kratak opis i detalj, a može imati projekat i dokaze.
@@ -78,13 +78,33 @@ Vrijeme proteklo od posljednje aktivnosti. Svjež rad na GitHub-u ili nova bilje
 _Izbjegavaj_: neaktivnost, idle
 
 **Svjež rad**:
-Nemanjin rad na GitHub-u ili bilješka sesije u tekućem periodu izvještaja, iz repoa i projekata sa spiska aktivnih. Ne računaju se tuđi rad, rad botova, commitovi agenta ni commitovi koji mijenjaju samo folder bilješki, a bilješka se računa preko svog foldera i svog vremena.
+Nemanjin rad na GitHub-u ili bilješka sesije u tekućem periodu izvještaja, iz repoa i projekata sa spiska aktivnih. Ne računaju se tuđi rad, rad botova, commitovi agenta ni commitovi koji mijenjaju samo folder bilješki, `pitanja-o-radu/` ili signal rada, a bilješka se računa preko svog foldera i svog vremena.
 
 **Zatvoren dan**:
-Dan za koji je izvještaj objavljen i mentor je dobio poruku. Zatvoren je i dan bez rada, kad je mentor dobio "Danas nema zabilježenog rada". Tog dana nema više pitanja ni slanja, a rad poslije toga ulazi u sljedeći izvještaj.
+Radni dan za koji je izvještaj objavljen i mentor je dobio poruku. Zatvoren je i dan bez rada, kad je mentor dobio "Danas nema zabilježenog rada". Tog dana nema više pitanja o završetku ni slanja, a rad poslije toga ulazi u sljedeći izvještaj. Pitanja o radu i dalje rade.
 
 **Pitanje o završetku**:
 Poruka kojom agent pita Nemanju da li je završio za danas.
 
 **Javljanje o završetku**:
-Nemanjin odgovor da je završio za danas, dugmetom na pitanje o završetku ili porukom "završio" poslatom botu u bilo kom trenutku. Izvještaj zbog njega kreće odmah.
+Nemanjin odgovor da je završio za danas, dugmetom na pitanje o završetku ili porukom "završio" poslatom botu u bilo kom trenutku. Izvještaj zbog njega kreće odmah. "završio" poslije ponoći zatvara radni dan koji je u toku.
+
+**Radni dan**:
+Dan na koji se odnose izvještaj, pitanje o završetku i "završio". Traje do slanja izvještaja, a najkasnije do 1:00, pa rad i "završio" poslije ponoći pripadaju radnom danu koji je u toku. Poslije slanja počinje novi radni dan.
+_Izbjegavaj_: kalendarski dan (osim za dnevni limit pitanja o radu)
+
+**Samostalno slanje**:
+Slanje izvještaja bez "završio". Kreće tek poslije 23:00, kad prođe 40 minuta bez rada, i to najranije u 23:40, a najkasnije u 1:00. Rad za ovo pravilo je posljednja aktivnost, svjež rad i signal rada. Izvještaj poslat poslije ponoći ide mentoru bez zvuka.
+
+**Odloženo slanje**:
+Stanje radnog dana poslije Nemanjine poruke "odloži". Nema pitanja o završetku ni samostalnog slanja poslije 40 minuta bez rada, nego izvještaj ide na "završio", a najkasnije u 1:00. Rezerva za rad koji agent ne vidi.
+
+**Signal rada**:
+Commit fajla `signal-rada.json` u privatnom repou, koji Claude na claude.ai upiše poslije 22:30, na oko 20 minuta rada. Računa se vrijeme commita, a ne vrijeme u fajlu. Signal je samo aktivnost za samostalno slanje i nikad ne ulazi u izvještaj.
+
+**Pitanje o radu**:
+Poruka botu kojom mentor ili Nemanja pita šta je Nemanja uradio. Sa mentorovog chata svaka poruka je pitanje o radu, a sa Nemanjinog svaka osim "završio" i "odloži". Ne mijenja stanje radnog dana.
+_Izbjegavaj_: pitanje (samo, sudara se sa pojmom pitanje o završetku), upit
+
+**Odgovor o radu**:
+Kratak odgovor agenta na pitanje o radu, napisan iz izvještaja, bilješki sesija i GitHub-a za posljednjih 30 dana. O Nemanji piše u trećem licu, a uz odgovor iz izvještaja ide link na izvještaj na sajtu. Prolazi istu provjeru kao izvještaj. Pitanja i odgovori o radu se čuvaju u privatnom repou radi provjere.
