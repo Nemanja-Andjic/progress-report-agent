@@ -19,6 +19,7 @@ Veće odluke su u ADR 0007, 0008, 0009 i 0010. Ovdje su vrijednosti koje se lako
 - Komande sa Nemanjinog chata su samo poruke „završio" i „odloži", sa kvačicom ili bez nje, bez obzira na velika slova i razmake oko riječi.
 - Mentorovo pitanje ide samo dok je `PITANJA_MENTORA = "ukljucena"` u `wrangler.toml`.
 - Worker ima opštu rutu za poruke vlasniku. Actions preko nje šalje tekst, a Worker ga samo proslijedi na Nemanjin chat. Kroz nju idu greške i obavještenja.
+- Izuzetak je jutarnja provjera kad Worker ne odgovara: workflow padne (mejl od GitHub-a) i pošalje direktnu poruku. Telegram token je zato i u GitHub Secrets, samo za taj korak.
 
 ### Slanje poslije 23:00
 
