@@ -1,6 +1,6 @@
 # Signal rada sa claude.ai je commit jednog fajla, a vrijeme je vrijeme commita
 
-Hook vidi samo Claude Code (ADR 0005), pa rad na claude.ai poslije 23:00 agent ne bi vidio, a izvještaj bi otišao usred rada (ADR 0008). Zato Claude na claude.ai, u projektu „Rad sa Tarikom", upisuje signal rada u privatni repo.
+Hook vidi samo Claude Code (ADR 0005), pa rad na claude.ai poslije 23:00 agent ne bi vidio, a izvještaj bi otišao usred rada (ADR 0008). Zato Claude na claude.ai, u Nemanjinom projektu na claude.ai, upisuje signal rada u privatni repo.
 
 - Signal je jedan fajl, `signal-rada.json` u korijenu privatnog repoa. Claude ga svaki put prepiše sadržajem `{"izvor": "claude.ai", "vrijeme": "<vrijeme Nemanjine poruke>"}`, a commit poruka je uvijek „Signal rada".
 - Claude upiše signal na svoj odgovor ako je Nemanjina poruka poslata poslije 22:30, a od prethodnog signala je prošlo 20+ minuta. Vrijeme vidi iz Nemanjinih poruka. O signalu kaže samo jednu kratku rečenicu, da Nemanja vidi da radi.
@@ -19,4 +19,4 @@ Na claude.ai nema sata ni hooka, pa vrijeme koje Claude upiše može biti netač
 - Signal ne nosi ništa iz razgovora, pa ADR 0002 nema šta da provjeri.
 - Signal je samo aktivnost za samostalno slanje. Nije rad za izvještaj i ne ulazi u izvještaj.
 - Objava i `testovi.yml` ignorišu `signal-rada.json`.
-- Uputstvo projekta „Rad sa Tarikom" na claude.ai se dopunjuje ručno, kao kod bilješki.
+- Uputstvo Nemanjinog projekta na claude.ai se dopunjuje ručno, kao kod bilješki.
