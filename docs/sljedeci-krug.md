@@ -2,7 +2,7 @@
 
 ## Odluke iz planiranja trećeg kruga
 
-Veće odluke su u ADR 0007, 0008 i 0009. Ovdje su vrijednosti koje se lako mijenjaju:
+Veće odluke su u ADR 0007, 0008, 0009 i 0010. Ovdje su vrijednosti koje se lako mijenjaju:
 
 ### Pitanja o radu
 
@@ -28,6 +28,11 @@ Veće odluke su u ADR 0007, 0008 i 0009. Ovdje su vrijednosti koje se lako mijen
 - Bez zvuka poslije ponoći, i za izvještaj i za „Danas nema zabilježenog rada".
 - Potvrda na „odloži": „U redu, čekam tvoje ‚završio', najkasnije do 1:00."
 - Signal rada: poslije 22:30, kad je od prethodnog prošlo 20+ minuta.
+
+### Jutarnja provjera
+
+- Worker je pokreće jednom dnevno u 6:30 UTC, preko `workflow_dispatch`. `schedule` u `jutarnja-provjera.yml` ostaje samo kao rezerva.
+- Ako je provjera za taj dan već urađena, rezervno pokretanje završi bez poruke.
 
 ## Odluke iz planiranja drugog kruga
 
