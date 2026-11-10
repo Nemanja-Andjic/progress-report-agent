@@ -1,5 +1,34 @@
 # Za sljedeći krug: gdje agent radi i kako čita sesije
 
+## Odluke iz planiranja trećeg kruga
+
+Veće odluke su u ADR 0007, 0008 i 0009. Ovdje su vrijednosti koje se lako mijenjaju:
+
+### Pitanja o radu
+
+- Worker čeka odgovor 5 minuta od pokretanja workflow-a. Grok ima rok od 150 sekundi, a ponovni pokušaj ide samo ako stane u tih 5 minuta.
+- Mentor ima 15 pitanja po kalendarskom danu (`Europe/Belgrade`), a broj se obnavlja u ponoć. Neuspjela pitanja i poruke bez teksta se ne broje. Nemanjina pitanja nemaju limit.
+- Kad je broj potrošen: „Za danas je potrošen dnevni broj pitanja. Možeš ponovo sutra."
+- Na svako pitanje bot odmah odgovori: „Razmišljam, odgovor stiže za minut-dva."
+- Kad odgovor ne uspije: „Trenutno ne mogu da odgovorim, pokušaj ponovo za nekoliko minuta."
+- Na poruku bez teksta (slika, glasovna poruka, stiker): „Mogu da odgovorim samo na pitanja napisana tekstom."
+- Ako mentor traži persiranje, workflow uz svaki odgovor javi Workeru oblik obraćanja. Worker ga upiše u D1, pa i stalne poruke prelaze na „vi".
+- Pamćenje je 5 posljednjih pitanja i odgovora sa istog chata, iz posljednja 24 sata.
+- Odgovor ima do 6–8 rečenica i na jeziku je pitanja.
+- Odgovori o radu uvijek stižu sa zvukom.
+- Komande sa Nemanjinog chata su samo poruke „završio" i „odloži", sa kvačicom ili bez nje, bez obzira na velika slova i razmake oko riječi.
+- Mentorovo pitanje ide samo dok je `PITANJA_MENTORA = "ukljucena"` u `wrangler.toml`.
+- Worker ima opštu rutu za poruke vlasniku. Actions preko nje šalje tekst, a Worker ga samo proslijedi na Nemanjin chat. Kroz nju idu greške i obavještenja.
+
+### Slanje poslije 23:00
+
+- 40 minuta bez rada, najranije u 23:40, najkasnije u 1:00.
+- Provjera u Actions: prva u 23:40, pa tek u T + 40 minuta od posljednjeg rada. U 1:00 nema provjere.
+- Najviše dva samostalna pokušaja: poslije 40 minuta bez rada i u 1:00.
+- Bez zvuka poslije ponoći, i za izvještaj i za „Danas nema zabilježenog rada".
+- Potvrda na „odloži": „U redu, čekam tvoje ‚završio', najkasnije do 1:00."
+- Signal rada: poslije 22:30, kad je od prethodnog prošlo 20+ minuta.
+
 ## Odluke iz planiranja drugog kruga
 
 Veće odluke su u ADR 0004, 0005 i 0006. Ovdje su vrijednosti koje se lako mijenjaju:
