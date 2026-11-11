@@ -33,6 +33,8 @@ type Env = typeof ENV;
 let poruke: { chat: number; tekst: string; bezZvuka?: true }[];
 let pokretanja: { url: string; token: string | null; telo: unknown }[];
 let telegramPada: boolean;
+let telegramNeOdgovara: boolean;
+let pozivaTelegrama: number;
 let mentorPada: boolean;
 let githubPada: boolean;
 let dugmad: unknown[];
@@ -42,6 +44,8 @@ async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promi
   const zahtjev = new Request(ulaz, opcije);
   const adresa = new URL(zahtjev.url);
   if (adresa.hostname === "api.telegram.org") {
+    pozivaTelegrama++;
+    if (telegramNeOdgovara) throw new TypeError("Nema odgovora.");
     if (telegramPada) return new Response("{}", { status: 500 });
     if (adresa.pathname === `/bot${TOKEN_BOTA}/answerCallbackQuery`) {
       const telo = (await zahtjev.json()) as { callback_query_id: string; text?: string };
@@ -151,6 +155,8 @@ beforeEach(async () => {
   poruke = [];
   pokretanja = [];
   telegramPada = false;
+  telegramNeOdgovara = false;
+  pozivaTelegrama = 0;
   mentorPada = false;
   githubPada = false;
   dugmad = [];
@@ -1870,6 +1876,124 @@ describe("od 1:00 do 5:00", () => {
 
     await pozovi(telegramZahtjev("završio", CHAT_TUDJI));
 
+    expect(poruke).toEqual([]);
+  });
+});
+
+describe("poruka vlasniku", () => {
+  function vlasnikZahtjev(telo: unknown, kljuc: string | null = KLJUC_ACTIONS, metoda = "POST"): Request {
+    const zaglavlja: Record<string, string> = kljuc ? { Authorization: `Bearer ${kljuc}` } : {};
+    return new Request("https://worker.test/actions/vlasnik", {
+      method: metoda,
+      headers: zaglavlja,
+      body: typeof telo === "string" ? telo : JSON.stringify(telo),
+    });
+  }
+  const vlasniku = (tekst: unknown, env?: Partial<Env>) => pozovi(vlasnikZahtjev({ tekst }), env);
+
+  it("proslijedi tekst na Nemanjin chat, bez oznake probe", async () => {
+    const odgovor = await vlasniku("Pisanje nije uspjelo: Grok ne odgovara.");
+
+    expect(odgovor.status).toBe(200);
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: "Pisanje nije uspjelo: Grok ne odgovara." }]);
+  });
+
+  it.each([
+    ["bez ključa", null],
+    ["sa pogrešnim ključem", "pogresan"],
+    ["sa ključem hooka", KLJUC_HOOKA],
+    ["sa tajnom webhook-a", TAJNA_WEBHOOKA],
+  ])("odbija zahtjev %s i ne šalje ništa", async (_ime, kljuc) => {
+    const odgovor = await pozovi(vlasnikZahtjev({ tekst: "Poruka" }, kljuc));
+
+    expect(odgovor.status).toBe(401);
+    expect(poruke).toEqual([]);
+  });
+
+  it("bez podešenog ključa na Workeru odbija svaki zahtjev", async () => {
+    const odgovor = await pozovi(vlasnikZahtjev({ tekst: "Poruka" }, "undefined"), { ...ENV, KLJUC_ACTIONS: undefined });
+
+    expect(odgovor.status).toBe(401);
+    expect(poruke).toEqual([]);
+  });
+
+  it.each([
+    ["koje nije JSON", "nije json"],
+    ["bez teksta", {}],
+    ["sa tekstom koji nije niz znakova", { tekst: 42 }],
+    ["sa praznim tekstom", { tekst: "" }],
+    ["sa tekstom od samih razmaka", { tekst: "  \n " }],
+    ["sa tekstom dužim od 4000 znakova", { tekst: "a".repeat(4001) }],
+    ["koje je null", "null"],
+  ])("odbija tijelo %s i ne šalje ništa", async (_ime, telo) => {
+    const odgovor = await pozovi(vlasnikZahtjev(telo));
+
+    expect(odgovor.status).toBe(400);
+    expect(poruke).toEqual([]);
+  });
+
+  it("prima tekst od tačno 4000 znakova", async () => {
+    const tekst = "a".repeat(4000);
+
+    expect((await vlasniku(tekst)).status).toBe(200);
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst }]);
+  });
+
+  it("vraća 502 kad Telegram ne primi poruku, a slanje ne ponavlja", async () => {
+    telegramPada = true;
+
+    const odgovor = await vlasniku("Poruka");
+
+    expect(odgovor.status).toBe(502);
+    expect(pozivaTelegrama).toBe(1);
+  });
+
+  it("vraća 502 kad Telegram ne odgovori", async () => {
+    telegramNeOdgovara = true;
+
+    expect((await vlasniku("Poruka")).status).toBe(502);
+  });
+
+  it("bez podešenog Nemanjinog chata ne šalje nigdje i vraća 502", async () => {
+    const odgovor = await vlasniku("Poruka", { ...ENV, TELEGRAM_CHAT_NEMANJA: undefined });
+
+    expect(odgovor.status).toBe(502);
+    expect(pozivaTelegrama).toBe(0);
+  });
+
+  it.each([
+    ["u probnom režimu", "ukljucen"],
+    ["van probnog režima", "iskljucen"],
+    ["kad podešavanje fali", undefined],
+  ])("%s ide samo Nemanji, sa zvukom i bez oznake", async (_ime, rezim) => {
+    expect((await vlasniku("Poruka", { ...ENV, PROBNI_REZIM: rezim })).status).toBe(200);
+
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: "Poruka" }]);
+    expect(porukeNaChat(CHAT_MENTOR)).toEqual([]);
+  });
+
+  it("ništa ne pamti i ne dira dan", async () => {
+    await vlasniku("Poruka");
+    await zavrsio();
+    poruke = [];
+
+    expect(pisanja()).toHaveLength(1);
+    expect((await gotovo("Tekst izvještaja")).status).toBe(200);
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: "(proba)\n\nTekst izvještaja" }]);
+  });
+
+  it("ne mijenja dan na kom pisanje traje", async () => {
+    await zavrsio();
+    await vlasniku("Poruka");
+
+    expect((await gotovo("Tekst izvještaja")).status).toBe(200);
+    expect(porukeNaChat(CHAT_NEMANJA).at(-1)?.tekst).toBe("(proba)\n\nTekst izvještaja");
+  });
+
+  it("radi samo na POST", async () => {
+    const odgovor = await pozovi(vlasnikZahtjev(undefined, KLJUC_ACTIONS, "GET"));
+
+    expect(odgovor.status).toBe(404);
     expect(poruke).toEqual([]);
   });
 });

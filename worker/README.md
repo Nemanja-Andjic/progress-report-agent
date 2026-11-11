@@ -181,6 +181,27 @@ Odgovor nosi samo datum i fazu, nikad tekst poruke. `faza` je jedna od faza iz t
 | 400 | `datum` fali ili nije ispravan |
 | 401 | fali ključ ili nije ispravan |
 
+### `POST /actions/vlasnik`
+
+Traži isti ključ kao `/actions/rezultat`. Opšta ruta za poruke vlasniku (ADR 0004): kroz nju workflow-i iz privatnog repoa šalju Nemanji greške i obavještenja, pa im ne treba Telegram token. Jedini izuzetak je jutarnja provjera, koja Nemanji piše direktno, jer tada Worker ne odgovara (ADR 0010).
+
+```json
+{ "tekst": "Tekst poruke" }
+```
+
+`tekst` je obavezan, do 4000 znakova, i ne smije biti prazan. Čita se samo ovo polje.
+
+- Worker tekst samo proslijedi na Nemanjin chat, bez oznake "(proba)" i sa zvukom. Ništa ne pamti i ne mijenja stanje dana.
+- Poruka ide samo na Nemanjin chat, nikad na mentorov, i u probnom režimu i van njega. Ako `TELEGRAM_CHAT_NEMANJA` nije podešen, ne ide nigdje.
+- Worker ne ponavlja slanje. Ako Telegram ne primi poruku, o novom pokušaju odlučuje workflow.
+
+| Status | Značenje |
+|---|---|
+| 200 | poruka je poslata |
+| 400 | tijelo nije ispravno, a ništa se ne šalje |
+| 401 | fali ključ ili nije ispravan |
+| 502 | Telegram nije primio poruku |
+
 ### `POST /aktivnost`
 
 Traži zaglavlje `Authorization: Bearer <ključ hooka>`. Taj ključ ne radi ni na jednoj drugoj ruti, a nijedan drugi ključ ne radi na ovoj. Poziva ga hook iz [hookovi/aktivnost.py](../hookovi/aktivnost.py) (ADR 0005).
