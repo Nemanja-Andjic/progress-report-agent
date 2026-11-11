@@ -1,6 +1,6 @@
 # Worker
 
-Prima "završio" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, poslije 23:00 sam pokreće pisanje u GitHub Actions kad prođe 40 minuta bez rada i šalje poruku iz rezultata (ADR 0004, ADR 0008). Mentoru poruke šalje samo Worker.
+Prima "završio", "odloži" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, poslije 23:00 sam pokreće pisanje u GitHub Actions kad prođe 40 minuta bez rada i šalje poruku iz rezultata (ADR 0004, ADR 0008). Mentoru poruke šalje samo Worker.
 
 Jutarnju provjeru radi `jutarnja-provjera.yml` u privatnom repou, a ne Worker, da bi otkrila i kvar Workera. Od Workera samo čita stanje dana (`GET /actions/stanje`).
 
@@ -66,6 +66,24 @@ Cron pokreće `provjera-svjezeg-rada.yml` u prvom cron-u u kom je vrijeme bar 23
 - **Neuspjeh prije 23:00**, npr. poslije "Jesam", ukida samo nova pitanja tog dana. Samostalno slanje poslije 23:00 i u 1:00 i dalje važi.
 - **Pitanje bez odgovora** ne zaustavlja samostalno slanje, a ni "Nije" ga ne odlaže.
 - **Dan bez rada** se utvrđuje istim putem, pa "Danas nema zabilježenog rada" ne ide prije 23:40.
+- **"odloži"** ukida samostalno slanje poslije 40 minuta bez rada, ali ne i 1:00 (vidi ispod).
+
+## "odloži"
+
+Poruka "odloži" (ili "odlozi"), samo sa Nemanjinog chata, rezerva je za rad koji agent ne vidi (ADR 0008). Važi za radni dan koji je u toku, i prije 23:00 i od 0:00 do 1:00. Bot potvrdi: "U redu, čekam tvoje ‚završio', najkasnije do 1:00."
+
+Od tada tog radnog dana nema pitanja o završetku ni provjera, a izvještaj ide na "završio" ili u 1:00. Provjera koja je bila u toku se odbacuje.
+
+| Faza | "odloži" |
+|---|---|
+| `otvoren`, `neuspjeh` | potvrda. Ponovno "odloži" samo ponovi potvrdu |
+| `pisanje` | odgovara da je pisanje u toku |
+| `bez_poruke` | odgovara da poruka još nije poslata |
+| `zatvoren` | odgovara da je izvještaj već poslat |
+
+- **Pitanje koje je već poslato** ostaje. "Jesam" i dalje pokreće pisanje, a "Nije" dobija odgovor "U redu." i ne pravi novo pitanje.
+- **Poslije neuspjeha** "odloži" važi kao i inače, pa pisanje kreće u 1:00 ako taj pokušaj nije potrošen.
+- **Poništavanja nema.** Izlaz je "završio".
 
 ## Pitanje o završetku
 
@@ -108,7 +126,7 @@ Na pitanje bez odgovora nema novog pitanja dok se ne pojavi nova aktivnost. Posl
 
 ### `POST /telegram`
 
-Traži zaglavlje `X-Telegram-Bot-Api-Secret-Token`. Prima poruku "završio", sa Nemanjinog chata, bez obzira na velika slova, razmake oko riječi i kvačicu na `š`, i pritisak na dugme sa pitanja (`callback_query`). Sve ostalo se tiho preskače, sa statusom 200, da Telegram ne ponavlja zahtjev.
+Traži zaglavlje `X-Telegram-Bot-Api-Secret-Token`. Prima poruke "završio" i "odloži", sa Nemanjinog chata, bez obzira na velika slova, razmake oko riječi i kvačicu, i pritisak na dugme sa pitanja (`callback_query`). Sve ostalo se tiho preskače, sa statusom 200, da Telegram ne ponavlja zahtjev.
 
 ### `POST /actions/rezultat`
 

@@ -26,12 +26,15 @@ export interface StanjeDana {
   nijeOd: number | null;
   // Prije ovog trenutka nema nove provjere, jer prethodna nije uspjela ili pitanje nije poslato.
   odlozenoDo: number | null;
+  // Nemanja je poslao "odloži": izvještaj ide na "završio" ili u 1:00 (ADR 0008).
+  odlozenoSlanje: boolean;
 }
 
 export type OdgovorNaPitanje = "jesam" | "nije";
 
 export type Dogadjaj =
   | { vrsta: "zavrsio" }
+  | { vrsta: "odlozi" }
   | { vrsta: "cron" }
   | { vrsta: "aktivnost" }
   | { vrsta: "rezultat"; ishod: "gotovo"; tekst: string }
@@ -139,6 +142,7 @@ export function noviDan(datum: string): StanjeDana {
     pitanjeOd: null,
     nijeOd: null,
     odlozenoDo: null,
+    odlozenoSlanje: false,
   };
 }
 
@@ -211,6 +215,16 @@ function zavrsio(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
   }
 }
 
+const POTVRDA_ODLAGANJA = "U redu, čekam tvoje ‚završio', najkasnije do 1:00.";
+
+// Pisanje, poruka bez slanja i zatvoren dan dobijaju isti odgovor kao na "završio".
+function odlozi(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
+  if (stanje.faza !== "otvoren" && stanje.faza !== "neuspjeh") return zavrsio(stanje, lokalno);
+  // Provjera u toku se odbacuje, da njen rezultat ne pošalje pitanje ni ne pokrene pisanje.
+  const odlozeno = stanje.odlozenoSlanje ? stanje : { ...stanje, odlozenoSlanje: true, provjeraOd: null };
+  return poNemanji(odlozeno, POTVRDA_ODLAGANJA);
+}
+
 function provjeraPala(stanje: StanjeDana, lokalno: LokalnoVrijeme): StanjeDana {
   return { ...stanje, provjeraOd: null, odlozenoDo: lokalno.trenutak + PONOVO_PROVJERA_MS };
 }
@@ -242,6 +256,8 @@ function pokreniProvjeru(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
 
 function cronProvjere(stanje: StanjeDana, lokalno: LokalnoVrijeme, dio: DioRadnogDana): Prelaz {
   const nista = { stanje, radnje: [] };
+  // Odloženo slanje nema ni pitanja ni samostalnog slanja, nego samo pokušaj iz 1:00.
+  if (stanje.odlozenoSlanje) return nista;
   if (stanje.provjeraOd !== null) {
     if (lokalno.trenutak - stanje.provjeraOd < ROK_PROVJERE_MS) return nista;
     return { stanje: provjeraPala(stanje, lokalno), radnje: [] };
@@ -310,7 +326,10 @@ function dugme(stanje: StanjeDana, dogadjaj: Extract<Dogadjaj, { vrsta: "dugme" 
     const prelaz = zavrsio(stanje, lokalno);
     return { stanje: prelaz.stanje, radnje: [{ vrsta: "odgovori_na_dugme", id }, ...prelaz.radnje] };
   }
-  if (stanje.faza !== "otvoren") return { stanje, radnje: [{ vrsta: "odgovori_na_dugme", id, tekst: "U redu." }] };
+  // Poslije "odloži" novog pitanja nema, pa se ni ne obećava.
+  if (stanje.faza !== "otvoren" || stanje.odlozenoSlanje) {
+    return { stanje, radnje: [{ vrsta: "odgovori_na_dugme", id, tekst: "U redu." }] };
+  }
   return {
     // Provjera u toku se odbacuje, da pitanje ne stigne odmah poslije "Nije".
     stanje: { ...stanje, pitanjeOd: null, nijeOd: lokalno.trenutak, provjeraOd: null },
@@ -362,6 +381,9 @@ export function primijeni(stanje: StanjeDana, dogadjaj: Dogadjaj, lokalno: Lokal
     case "zavrsio":
       // "završio" uvijek važi za radni dan, a ostali događaji za dan kom pripadaju.
       return zavrsio(jeRadniDan(stanje, lokalno) ? stanje : noviDan(lokalno.datum), lokalno);
+
+    case "odlozi":
+      return odlozi(jeRadniDan(stanje, lokalno) ? stanje : noviDan(lokalno.datum), lokalno);
 
     case "cron":
       return cron(stanje, lokalno);
