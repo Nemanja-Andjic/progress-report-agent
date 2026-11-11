@@ -6,7 +6,8 @@ Komande:
              ili neuspjeh. Izlazni kod je 1 samo za neuspjeh. Commit radi workflow.
   svjez-rad  --repo PUTANJA
              Na stdout ispiše jedan JSON red sa ishodom: svjez-rad, nema-svjezeg-rada ili
-             neuspjeh. Izlazni kod je 1 samo za neuspjeh. Groka ne zove.
+             neuspjeh. Izlazni kod je 1 samo za neuspjeh. Groka ne zove. Računa i signal
+             rada, po vremenu njegovog commita.
   poruka     --datum GGGG-MM-DD --repo PUTANJA --adresa-sajta URL
              Na stdout ispiše tekst mentorove poruke iz fajla izvještaja.
 
@@ -33,6 +34,9 @@ from zoneinfo import ZoneInfo
 FOLDER_IZVJESTAJA = "izvjestaji"
 FOLDER_BILJESKI = "biljeske-sesija"
 FAJL_PROJEKATA = "projekti.json"
+FOLDER_PITANJA = "pitanja-o-radu"
+# Signal rada sa claude.ai (ADR 0009): računa se samo vrijeme njegovog commita.
+FAJL_SIGNALA = "signal-rada.json"
 # Ugovor sa sajtom u privatnom repou: po ovom imenu se računa oznaka porijekla.
 IME_AGENTA = "progress-report-agent"
 ZONA = ZoneInfo("Europe/Belgrade")
@@ -153,14 +157,28 @@ def provjeri_istoriju(koren: Path) -> None:
         raise Neuspjeh("Repo je plitka kopija, a treba puna istorija.")
 
 
-def autori(koren: Path, putanja: str) -> list[str]:
-    """Autori commitova koji su mijenjali putanju, od najstarijeg."""
+def istorija_putanje(koren: Path, putanja: str, *argumenti: str) -> list[str]:
+    """Redovi iz `git log` za commitove koji su mijenjali putanju, a prazan spisak bez commitova."""
     if git(koren, "rev-parse", "--verify", "--quiet", "HEAD").returncode != 0:
         return []  # Repo još nema nijedan commit.
-    rezultat = git(koren, "log", "--reverse", "--format=%an", "--", putanja)
+    rezultat = git(koren, "log", *argumenti, "--", putanja)
     if rezultat.returncode != 0:
         raise Neuspjeh("Git istorija nije mogla da se pročita.")
     return rezultat.stdout.splitlines()
+
+
+def vrijeme_signala(koren: Path) -> datetime | None:
+    """Vrijeme posljednjeg commita koji je mijenjao signal rada, a None ako signala nema.
+
+    Vrijeme iz fajla se ne čita, jer Claude na claude.ai nema pouzdan sat (ADR 0009).
+    """
+    redovi = istorija_putanje(koren, FAJL_SIGNALA, "-1", "--format=%cI")
+    return procitaj_vrijeme(redovi[0]) if redovi else None
+
+
+def autori(koren: Path, putanja: str) -> list[str]:
+    """Autori commitova koji su mijenjali putanju, od najstarijeg."""
+    return istorija_putanje(koren, putanja, "--reverse", "--format=%an")
 
 
 def python_repoa(koren: Path) -> Path:
@@ -357,24 +375,32 @@ def issue_i_pr(repo: str, od: datetime, do: datetime, token: str) -> Iterator[di
         }
 
 
-def mijenja_samo_biljeske(repo: str, sha: str, token: str) -> bool:
+def je_zapis_bez_rada(ime: str) -> bool:
+    """Bilješka, pitanje o radu i signal rada sami po sebi nisu rad na GitHub-u."""
+    return ime == FAJL_SIGNALA or ime.startswith((f"{FOLDER_BILJESKI}/", f"{FOLDER_PITANJA}/"))
+
+
+def mijenja_samo_zapise_bez_rada(repo: str, sha: str, token: str) -> bool:
     adresa = f"{ADRESA_GITHUB}/repos/{urllib.parse.quote(repo)}/commits/{sha}"
     ima_fajlova = False
     for stranica in stranice_githuba(adresa, token):
         for fajl in stranica["files"]:
             ima_fajlova = True
-            # Preimenovanje mijenja i stari i novi folder.
-            for ime in (fajl["filename"], fajl.get("previous_filename", f"{FOLDER_BILJESKI}/")):
-                if not ime.startswith(f"{FOLDER_BILJESKI}/"):
-                    return False
+            # Preimenovanje mijenja i staro i novo mjesto, pa se gledaju oba imena.
+            imena = [fajl["filename"]]
+            if "previous_filename" in fajl:
+                imena.append(fajl["previous_filename"])
+            if not all(je_zapis_bez_rada(ime) for ime in imena):
+                return False
     return ima_fajlova
 
 
 def commitovi(repo: str, od: datetime, do: datetime, token: str) -> Iterator[dict]:
     """Nemanjini commitovi iz perioda sa svih grana, bez onih koji nisu rad.
 
-    Agentov izvještaj i bilješka bi inače sami pravili rad, pa dan bez rada ne bi mogao da se
-    desi, a sljedeći izvještaj bi opisivao prethodni. Bilješke ulaze preko svog foldera. Ime agenta
+    Agentov izvještaj i zapisi iz `je_zapis_bez_rada` bi inače sami pravili rad, pa dan bez rada
+    ne bi mogao da se desi, a sljedeći izvještaj bi opisivao prethodni. Bilješke ulaze preko svog
+    foldera, a signal rada nije rad, nego ga komanda svjez-rad čita iz lokalne istorije. Ime agenta
     se gleda posebno, jer njegov commit može da nosi email vezan za njegov nalog.
     """
     vidjeni = set()
@@ -389,7 +415,7 @@ def commitovi(repo: str, od: datetime, do: datetime, token: str) -> Iterator[dic
                 continue
             if not nemanjin_nalog(commit["author"]):
                 continue
-            if mijenja_samo_biljeske(repo, commit["sha"], token):
+            if mijenja_samo_zapise_bez_rada(repo, commit["sha"], token):
                 continue
             naslov, _, tekst = commit["commit"]["message"].partition("\n")
             yield {
@@ -727,10 +753,12 @@ def pisi(datum: str, koren: Path, upozorenja: list[str]) -> dict:
 
 
 def svjez_rad(koren: Path, upozorenja: list[str]) -> dict:
-    """Vrijeme posljednjeg rada u tekućem periodu, iz istog koda koji daje ulaz za pisanje.
+    """Vrijeme posljednjeg rada u tekućem periodu: svjež rad ili signal rada, šta je kasnije.
 
-    Bilješka sa pogotkom iz ADR 0002 ne ide Groku, ali rad je bio, a ovdje ide samo vrijeme. Zato se
-    provjera ne zove. Kraj je tačan trenutak, jer je rad iz ovog minuta upravo ono što se traži.
+    Svjež rad dolazi iz istog koda koji daje ulaz za pisanje, a signal samo iz vremena svog commita,
+    jer nije rad za izvještaj. Bilješka sa pogotkom iz ADR 0002 ne ide Groku, ali rad je bio, a
+    ovdje ide samo vrijeme. Zato se provjera ne zove. Kraj je tačan trenutak, jer je rad iz ovog
+    minuta upravo ono što se traži.
     """
     provjeri_istoriju(koren)
     projekti = aktivni_projekti(koren)
@@ -740,6 +768,9 @@ def svjez_rad(koren: Path, upozorenja: list[str]) -> dict:
         vrijeme for _, vrijeme, _ in biljeske_iz_perioda(koren, od, do, list(projekti), upozorenja)
     ]
     vremena += [podatak["vrijeme"] for podatak in rad_na_githubu(projekti, od, do)]
+    signal = vrijeme_signala(koren)
+    if signal is not None and od <= signal <= do:
+        vremena.append(signal)
     if not vremena:
         return {"ishod": "nema-svjezeg-rada"}
     return {"ishod": "svjez-rad", "vrijeme": zapisi_vrijeme(max(vremena))}

@@ -36,4 +36,17 @@ python napravi_sajt.py --provjeri-biljesku <fajl>
 Bilješku koja ne prođe provjeru ne commit-uj.
 
 Ako nisi siguran da nešto smije u bilješku, izostavi to. Commit poruka je samo "Bilješka sesije". Kad završiš, javi jednom rečenicom da je bilješka upisana, a tekst nemoj prepisivati u odgovor.
+
+Signal rada: kad je Nemanjina poruka poslata poslije 22:30, a od prethodnog signala rada je prošlo 20 minuta ili više, uz svoj odgovor upiši signal rada, bez pitanja.
+
+Signal je fajl signal-rada.json u korijenu repoa Nemanja-Andjic/progress-report-izvjestaji, commit-ovan direktno u main. Svaki put ga prepiši cijelog, ovim sadržajem:
+{"izvor": "claude.ai", "vrijeme": "2026-10-25T23:05+01:00"}
+
+- vrijeme: vrijeme Nemanjine poruke, po njegovom lokalnom vremenu, sa vremenskom zonom. Ne pitaj Nemanju za tačno vrijeme, jer agent računa vrijeme commita, a ne ovo polje.
+- Ne upisuj ništa drugo u fajl i ne mijenjaj nijedan drugi fajl.
+- Commit poruka je samo "Signal rada".
+
+O signalu kaži samo jednu kratku rečenicu, npr. "Signal rada je upisan."
 ```
+
+Signal postoji da agent vidi rad na claude.ai kad odlučuje o samostalnom slanju poslije 23:00 (ADR 0009). Računa se samo vrijeme commita, pa netačno vrijeme u fajlu ne smeta, a signal nikad ne ulazi u izvještaj.
