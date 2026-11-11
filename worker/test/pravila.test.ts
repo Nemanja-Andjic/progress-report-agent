@@ -13,6 +13,7 @@ const dan = (faza: StanjeDana["faza"], tekst: string | null = null): StanjeDana 
 });
 const zavrsio = { vrsta: "zavrsio" } as const;
 const cron = { vrsta: "cron" } as const;
+const RADNI_DAN_ZATVOREN = "Radni dan je zatvoren u 1:00. Rad od sada ulazi u sljedeći izvještaj.";
 
 describe('"završio"', () => {
   it("na otvoren dan pokreće pisanje za taj datum", () => {
@@ -43,8 +44,8 @@ describe('"završio"', () => {
     expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: "2030-05-16" });
   });
 
-  it("od 1:00 ne čeka jučerašnje pisanje", () => {
-    const { radnje } = primijeni(dan("pisanje"), zavrsio, u("2030-05-16", 1, 0));
+  it("od 5:00 važi za novi dan", () => {
+    const { radnje } = primijeni(noviDan("2030-05-16"), zavrsio, u("2030-05-16", 5, 0));
 
     expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: "2030-05-16" });
   });
@@ -815,8 +816,24 @@ describe("pitanje o završetku", () => {
       expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: DATUM });
     });
 
-    it("od juče od 1:00 je isteklo, iako radni dan nije zatvoren", () => {
-      const { radnje } = primijeni(pitanje(), dugme("jesam"), u("2030-05-16", 1, 0));
+    it('"Jesam" od juče od 1:00 do 5:00 kaže da je radni dan zatvoren, iako nije poslat', () => {
+      for (const [sat, minut] of [[1, 0], [4, 59]]) {
+        const pocetno = noviDan("2030-05-16");
+        const { stanje, radnje } = primijeni(pocetno, dugme("jesam"), u("2030-05-16", sat, minut));
+
+        expect(stanje).toBe(pocetno);
+        expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: RADNI_DAN_ZATVOREN }]);
+      }
+    });
+
+    it('"Nije" od juče od 1:00 je isteklo', () => {
+      const { radnje } = primijeni(noviDan("2030-05-16"), dugme("nije"), u("2030-05-16", 2, 0));
+
+      expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
+    });
+
+    it('"Jesam" od juče od 5:00 je isteklo', () => {
+      const { radnje } = primijeni(noviDan("2030-05-16"), dugme("jesam"), u("2030-05-16", 5, 0));
 
       expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
     });
@@ -865,20 +882,20 @@ describe("prelazak na ljetnje i zimsko vrijeme", () => {
 
   it("rok se računa po pravom vremenu kad se sat vrati unazad", () => {
     // 02:50 po ljetnjem, pa 02:20 po zimskom: sat kaže da je vrijeme proteklo unazad.
-    const pisanje = primijeni(noviDan("2030-10-27"), zavrsio, lokalnoVrijeme(new Date("2030-10-27T00:50:00Z")));
+    const pisanje = { ...dan("pisanje"), datum: "2030-10-26", uTokuOd: Date.parse("2030-10-27T00:50:00Z") };
     const poslije = lokalnoVrijeme(new Date("2030-10-27T01:20:00Z"));
 
     expect(poslije.sat).toBe(2);
-    expect(primijeni(pisanje.stanje, cron, poslije).stanje.faza).toBe("neuspjeh");
+    expect(primijeni(pisanje, cron, poslije).stanje.faza).toBe("neuspjeh");
   });
 
   it("rok se računa po pravom vremenu kad sat skoči unaprijed", () => {
     // 01:50 po zimskom, pa 03:10 po ljetnjem: prošlo je 20 minuta, a sat kaže 80.
-    const pisanje = primijeni(noviDan("2030-03-31"), zavrsio, lokalnoVrijeme(new Date("2030-03-31T00:50:00Z")));
+    const pisanje = { ...dan("pisanje"), datum: "2030-03-30", uTokuOd: Date.parse("2030-03-31T00:50:00Z") };
     const poslije = lokalnoVrijeme(new Date("2030-03-31T01:10:00Z"));
 
     expect(poslije.sat).toBe(3);
-    expect(primijeni(pisanje.stanje, cron, poslije).stanje.faza).toBe("pisanje");
+    expect(primijeni(pisanje, cron, poslije).stanje.faza).toBe("pisanje");
   });
 });
 
@@ -1085,5 +1102,36 @@ describe('"odloži"', () => {
       expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d", tekst: "U redu." }]);
       tihoDo1(stanje, u(DATUM, 17, 10));
     });
+  });
+});
+
+describe("od 1:00 do 5:00", () => {
+  const SUTRA = "2030-05-16";
+  const ODGOVOR = { vrsta: "posalji_nemanji", tekst: RADNI_DAN_ZATVOREN };
+
+  it.each([
+    ["završio", "1:00", 1, 0, zavrsio],
+    ["završio", "4:59", 4, 59, zavrsio],
+    ["odloži", "1:00", 1, 0, { vrsta: "odlozi" } as const],
+    ["odloži", "4:59", 4, 59, { vrsta: "odlozi" } as const],
+  ] as const)('"%s" u %s ne pokreće ništa i ne važi za novi radni dan', (_ime, _vrijeme, sat, minut, dogadjaj) => {
+    const pocetno = noviDan(SUTRA);
+
+    expect(primijeni(pocetno, dogadjaj, u(SUTRA, sat, minut))).toEqual({ stanje: pocetno, radnje: [ODGOVOR] });
+  });
+
+  it('"završio" ne pokreće ništa ni dok jučerašnje pisanje teče', () => {
+    const pocetno = dan("pisanje");
+
+    expect(primijeni(pocetno, zavrsio, u(SUTRA, 1, 10))).toEqual({ stanje: pocetno, radnje: [ODGOVOR] });
+  });
+
+  it('od 5:00 "odloži" važi za novi radni dan', () => {
+    const { stanje, radnje } = primijeni(noviDan(SUTRA), { vrsta: "odlozi" }, u(SUTRA, 5, 0));
+
+    expect(stanje).toMatchObject({ datum: SUTRA, odlozenoSlanje: true });
+    expect(radnje).toEqual([
+      { vrsta: "posalji_nemanji", tekst: "U redu, čekam tvoje ‚završio', najkasnije do 1:00." },
+    ]);
   });
 });

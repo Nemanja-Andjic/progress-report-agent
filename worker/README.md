@@ -25,6 +25,7 @@ Stanje u bazi i pravila računaju **radni dan** (ADR 0008), po zoni `Europe/Belg
 - Aktivnost iz hooka, "završio" i dugme od 0:00 do 1:00 pripadaju jučerašnjem radnom danu dok nije zatvoren. Prva aktivnost poslije ponoći ne pravi novi dan dok je radni dan u toku.
 - Rezultat važi za dan iz svog `datum`, pa pisanje pokrenuto u 1:00 za jučerašnji dan teče dalje i zatvara svoj dan.
 - Dugme sa pitanja važi dok traje radni dan u kom je pitanje poslato, pa i poslije ponoći. Kad se dan zatvori, a najkasnije od 1:00, dugme dobija odgovor da je pitanje isteklo.
+- **Od 1:00 do 5:00** "završio", "odloži" i "Jesam" sa jučerašnjeg pitanja se uvijek odnose na sinoćni rad. Ne pokreću ništa i ne važe za novi radni dan, a bot odgovori: "Radni dan je zatvoren u 1:00. Rad od sada ulazi u sljedeći izvještaj." Na dugme to stiže kao odgovor na pritisak. "Nije" sa jučerašnjeg pitanja i dalje dobija odgovor da je pitanje isteklo. Od 5:00 sve radi kao inače.
 - Izvještaj i "Danas nema zabilježenog rada" idu mentoru bez zvuka (`disable_notification`) kad je kalendarski datum slanja poslije datuma radnog dana. Važi i za ponovljeno slanje. Poruke Nemanji, pa i one u probnom režimu, uvijek stižu sa zvukom.
 
 Rezultat koji stigne van faze `pisanje` ništa ne radi. Ako slanje ne uspije, ruta vraća 502, dan ostaje `bez_poruke`, a tekst ostaje u bazi dok cron ne pošalje poruku.
@@ -41,7 +42,7 @@ Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lo
 | `zatvoren` | ništa |
 
 - **Rokovi.** Računaju se po pravom vremenu, a ne po lokalnom satu, pa ih prelazak na ljetnje i zimsko vrijeme ne pomjera.
-- **Neuspjeh.** Mentor ne dobija ništa, pa ni "Danas nema zabilježenog rada". Dan ostaje nezatvoren, a rad ulazi u sljedeći izvještaj. Dok radni dan traje, upozorenje Nemanji nudi "završio" za novi pokušaj. Kad prođe, npr. poslije neuspjeha u 1:00, upozorenje kaže da rad ulazi u sljedeći izvještaj, jer bi "završio" tada pokrenulo novi dan.
+- **Neuspjeh.** Mentor ne dobija ništa, pa ni "Danas nema zabilježenog rada". Dan ostaje nezatvoren, a rad ulazi u sljedeći izvještaj. Dok radni dan traje, upozorenje Nemanji nudi "završio" za novi pokušaj. Kad prođe, npr. poslije neuspjeha u 1:00, upozorenje kaže da rad ulazi u sljedeći izvještaj, jer "završio" tada ne pokreće ništa do 5:00, a od 5:00 pokreće novi dan.
 - **Upozorenje o slanju.** Ako slanje ne uspije od 23:00 nadalje, Nemanja jednom dobija upozorenje. Ranije se slanje samo ponavlja.
 - **Dvostruko slanje.** Cron ne ponavlja slanje pokušano u posljednjih minut, pa ne šalje poruku koju ruta baš tada šalje. Ako Worker padne poslije poruke, a prije upisa `zatvoren`, ili odgovor Telegrama ne stigne, poruka može da ode dvaput. Telegram nema ključ koji bi to spriječio, a dvije iste poruke su bolje od poruke koja nikad ne stigne.
 
@@ -62,7 +63,7 @@ Cron pokreće `provjera-svjezeg-rada.yml` u prvom cron-u u kom je vrijeme bar 23
 
 - **Aktivnost za vrijeme provjere.** Pomjera T, a rezultat te provjere ne pokreće pisanje.
 - **1:00.** Ako radni dan nije zatvoren i pisanje nije u toku, pisanje kreće bez provjere. To je drugi samostalni pokušaj, i kad prvi nije ni krenuo. Cron koji izostane nadoknadi sljedeći, do 2:00. Pisanje koje je u 1:00 bilo u toku zauzima taj pokušaj, pa poslije njegovog neuspjeha nema novog.
-- **Najviše dva pokušaja.** Poslije neuspjeha prvog pokušaja nema novih provjera ni samostalnog slanja do 1:00. Poslije neuspjeha u 1:00 mentor ne dobija ništa, a Nemanja dobija upozorenje. "završio" i dalje uvijek pokreće novi pokušaj, a pisanje koje je ono pokrenulo ne troši samostalni pokušaj.
+- **Najviše dva pokušaja.** Poslije neuspjeha prvog pokušaja nema novih provjera ni samostalnog slanja do 1:00. Poslije neuspjeha u 1:00 mentor ne dobija ništa, a Nemanja dobija upozorenje. "završio" i dalje pokreće novi pokušaj dok radni dan traje, a pisanje koje je ono pokrenulo ne troši samostalni pokušaj.
 - **Neuspjeh prije 23:00**, npr. poslije "Jesam", ukida samo nova pitanja tog dana. Samostalno slanje poslije 23:00 i u 1:00 i dalje važi.
 - **Pitanje bez odgovora** ne zaustavlja samostalno slanje, a ni "Nije" ga ne odlaže.
 - **Dan bez rada** se utvrđuje istim putem, pa "Danas nema zabilježenog rada" ne ide prije 23:40.
@@ -70,7 +71,7 @@ Cron pokreće `provjera-svjezeg-rada.yml` u prvom cron-u u kom je vrijeme bar 23
 
 ## "odloži"
 
-Poruka "odloži" (ili "odlozi"), samo sa Nemanjinog chata, rezerva je za rad koji agent ne vidi (ADR 0008). Važi za radni dan koji je u toku, i prije 23:00 i od 0:00 do 1:00. Bot potvrdi: "U redu, čekam tvoje ‚završio', najkasnije do 1:00."
+Poruka "odloži" (ili "odlozi"), samo sa Nemanjinog chata, rezerva je za rad koji agent ne vidi (ADR 0008). Važi za radni dan koji je u toku, i prije 23:00 i od 0:00 do 1:00, a od 1:00 do 5:00 ne važi (vidi "Radni dan"). Bot potvrdi: "U redu, čekam tvoje ‚završio', najkasnije do 1:00."
 
 Od tada tog radnog dana nema pitanja o završetku ni provjera, a izvještaj ide na "završio" ili u 1:00. Provjera koja je bila u toku se odbacuje.
 

@@ -73,6 +73,8 @@ export interface Prelaz {
 
 const SAT_SLANJA = 23;
 const KRAJ_RADNOG_DANA_SAT = 1;
+// Od 1:00 do ovog sata "završio", "odloži" i "Jesam" se uvijek odnose na sinoćni rad.
+const KRAJ_NOCI_SAT = 5;
 // Do ovog sata cron gleda i jučerašnji radni dan, zbog pokušaja iz 1:00.
 export const KRAJ_DRUGOG_POKUSAJA_SAT = 2;
 const POCETAK_SAMOSTALNOG_MINUT = 23 * 60 + 40;
@@ -89,6 +91,7 @@ const ROK_PROVJERE_MS = 15 * 60_000;
 const PONOVO_PROVJERA_MS = 30 * 60_000;
 
 export const PITANJE_ISTEKLO = "Pitanje je isteklo.";
+const RADNI_DAN_ZATVOREN = "Radni dan je zatvoren u 1:00. Rad od sada ulazi u sljedeći izvještaj.";
 
 const FORMAT_VREMENA = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Europe/Belgrade",
@@ -108,6 +111,10 @@ export function lokalnoVrijeme(sada: Date): LokalnoVrijeme {
     minut: Number(dijelovi.minute),
     trenutak: sada.getTime(),
   };
+}
+
+function jeNocPoslijeKrajaRadnogDana(lokalno: LokalnoVrijeme): boolean {
+  return lokalno.sat >= KRAJ_RADNOG_DANA_SAT && lokalno.sat < KRAJ_NOCI_SAT;
 }
 
 // Datum pomjeren za dati broj dana. Podne po UTC-u ne zavisi od ljetnjeg i zimskog vremena.
@@ -183,8 +190,9 @@ function poNemanji(stanje: StanjeDana, tekst: string): Prelaz {
 }
 
 // Mentor ne dobija ništa, pa ni "nema rada": rad možda postoji, a izvještaj nije napisan.
-// Kad radni dan prođe, "završio" bi pokrenulo novi dan, pa se ne nudi. Pisanje koje padne od 1:00
-// je bilo u toku u 1:00 ili je to pokušaj iz 1:00, pa poslije njega nema samostalnog pokušaja.
+// Kad radni dan prođe, "završio" do 5:00 ne pokreće ništa, a od 5:00 pokreće novi dan, pa se ne nudi.
+// Pisanje koje padne od 1:00 je bilo u toku u 1:00 ili je to pokušaj iz 1:00, pa poslije njega nema
+// samostalnog pokušaja.
 function neuspjeh(stanje: StanjeDana, opis: string, lokalno: LokalnoVrijeme): Prelaz {
   const poslije1 = dioRadnogDana(stanje, lokalno) === "drugi_pokusaj";
   const dalje = jeRadniDan(stanje, lokalno)
@@ -317,6 +325,11 @@ function rezultatProvjere(
 
 function dugme(stanje: StanjeDana, dogadjaj: Extract<Dogadjaj, { vrsta: "dugme" }>, lokalno: LokalnoVrijeme): Prelaz {
   const { id } = dogadjaj;
+  // Pritisak noću bi inače pokrenuo novi dan ili samo rekao da je pitanje isteklo.
+  const sinocnoPitanje = dogadjaj.datum === pomjerenDatum(lokalno.datum, -1);
+  if (dogadjaj.odgovor === "jesam" && sinocnoPitanje && jeNocPoslijeKrajaRadnogDana(lokalno)) {
+    return { stanje, radnje: [{ vrsta: "odgovori_na_dugme", id, tekst: RADNI_DAN_ZATVOREN }] };
+  }
   // Dugme važi za radni dan u kom je pitanje poslato, pa i poslije ponoći, dok taj dan traje.
   if (dogadjaj.datum !== stanje.datum || !jeRadniDan(stanje, lokalno)) {
     return { stanje, radnje: [{ vrsta: "odgovori_na_dugme", id, tekst: PITANJE_ISTEKLO }] };
@@ -376,6 +389,10 @@ function slanjeNijeUspjelo(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz 
 // Stanje koje se ne mijenja vraća se kao isti objekat, pa Worker zna da nema šta da upiše.
 export function primijeni(stanje: StanjeDana, dogadjaj: Dogadjaj, lokalno: LokalnoVrijeme): Prelaz {
   const nista = { stanje, radnje: [] };
+
+  // Od 1:00 do 5:00 poruka se odnosi na sinoćni rad, pa ne važi ni za novi radni dan.
+  const poruka = dogadjaj.vrsta === "zavrsio" || dogadjaj.vrsta === "odlozi";
+  if (poruka && jeNocPoslijeKrajaRadnogDana(lokalno)) return poNemanji(stanje, RADNI_DAN_ZATVOREN);
 
   switch (dogadjaj.vrsta) {
     case "zavrsio":

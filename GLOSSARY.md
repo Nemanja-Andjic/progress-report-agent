@@ -87,10 +87,10 @@ Radni dan za koji je izvještaj objavljen i mentor je dobio poruku. Zatvoren je 
 Poruka kojom agent pita Nemanju da li je završio za danas.
 
 **Javljanje o završetku**:
-Nemanjin odgovor da je završio za danas, dugmetom na pitanje o završetku ili porukom "završio" poslatom botu u bilo kom trenutku. Izvještaj zbog njega kreće odmah. "završio" poslije ponoći zatvara radni dan koji je u toku.
+Nemanjin odgovor da je završio za danas, dugmetom na pitanje o završetku ili porukom "završio" poslatom botu u bilo kom trenutku, osim od 1:00 do 5:00. Izvještaj zbog njega kreće odmah. "završio" poslije ponoći zatvara radni dan koji je u toku. Od 1:00 do 5:00 "završio", "odloži" i "Jesam" sa jučerašnjeg pitanja ne pokreću ništa i ne važe za novi radni dan, jer se uvijek odnose na sinoćni rad.
 
 **Radni dan**:
-Dan na koji se odnose izvještaj, pitanje o završetku i "završio". Traje do slanja izvještaja, a najkasnije do 1:00, pa rad i "završio" poslije ponoći pripadaju radnom danu koji je u toku. Poslije slanja počinje novi radni dan.
+Dan na koji se odnose izvještaj, pitanje o završetku i "završio". Traje do slanja izvještaja, a najkasnije do 1:00, pa rad i "završio" poslije ponoći pripadaju radnom danu koji je u toku. Poslije slanja počinje novi radni dan. Od 1:00 do 5:00 novi radni dan ne primaju "završio" ni "odloži".
 _Izbjegavaj_: kalendarski dan (osim za dnevni limit pitanja o radu)
 
 **Samostalno slanje**:
