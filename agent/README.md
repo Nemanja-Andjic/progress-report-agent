@@ -46,7 +46,9 @@ Sa GitHub-a idu issue-i, PR-ovi i commitovi iz polja `repoi` aktivnih projekata,
 - commit ulazi ako mu je vrijeme commit-ovanja u periodu, sa bilo koje grane. Isti commit na više grana ulazi jednom;
 - opis i poruka commita se skraćuju na 2000 znakova, ali tek poslije provjere, da presječena tajna ne prođe kao običan tekst.
 
-Kao rad se **ne računaju** ni commitovi čije je ime autora `progress-report-agent` i commitovi koji mijenjaju samo `biljeske-sesija/`. Inače bi agentov izvještaj ili bilješka sami pravili rad, pa dan bez rada ne bi mogao da se desi, a sljedeći izvještaj bi opisivao prethodni. Commit koji mijenja i `biljeske-sesija/` i nešto drugo računa se kao rad, a bilješke i dalje ulaze preko svog foldera.
+Kao rad se **ne računaju** ni commitovi čije je ime autora `progress-report-agent` i commitovi koji mijenjaju samo `biljeske-sesija/`, `pitanja-o-radu/` ili `signal-rada.json` u korijenu repoa. Inače bi agentov izvještaj, bilješka, pitanje o radu ili signal rada sami pravili rad, pa dan bez rada ne bi mogao da se desi, a sljedeći izvještaj bi opisivao prethodni. Commit koji uz njih mijenja i nešto drugo računa se kao rad, a bilješke i dalje ulaze preko svog foldera.
+
+Signal rada (ADR 0009) nije rad i nikad nije ulaz za pisanje. Čita ga samo komanda `svjez-rad`, kao signal, po vremenu njegovog commita.
 
 Podaci sa GitHub-a se provjeravaju jednim pozivom `napravi_sajt.py --provjeri`, nad privremenim fajlom van repoa u kom je svaki podatak dvije stavke: naslov sa dokazom i tekst. Agent čita poruke po obliku `stavke[N].polje vrsta`. Svaki nalaz dodaje upozorenje bez vrijednosti:
 
@@ -89,18 +91,19 @@ Gotov fajl se prvo upiše kao `izvjestaji/GGGG-MM-DD.nacrt` i provjeri komandom 
 AGENT_GITHUB_TOKEN=... python agent/agent.py svjez-rad --repo ../progress-report-izvjestaji
 ```
 
-Komanda je za provjeru prije pitanja (#29). Ne zove Groka, a na stdout ispiše jedan JSON red, sa izlaznim kodom 1 samo za neuspjeh:
+Komanda je za provjeru prije pitanja (#29) i za provjeru poslije 23:00 pred samostalno slanje. Isto javljanje služi za obje, jer signala rada prije 22:30 nema. Ne zove Groka, a na stdout ispiše jedan JSON red, sa izlaznim kodom 1 samo za neuspjeh:
 
 | `ishod` | Značenje | Ostala polja |
 |---|---|---|
-| `svjez-rad` | u tekućem periodu ima rada | `vrijeme` posljednjeg rada |
-| `nema-svjezeg-rada` | u tekućem periodu nema rada | |
+| `svjez-rad` | u tekućem periodu ima svježeg rada ili signala rada | `vrijeme` posljednjeg od njih |
+| `nema-svjezeg-rada` | u tekućem periodu nema ni svježeg rada ni signala rada | |
 | `neuspjeh` | ne zna se da li ima rada, pa pitanje ne smije da krene | `razlog` |
 
-I ovdje uvijek postoji polje `upozorenja`. Period i pravila su isti kao za pisanje, pa treba puna git istorija, a tuđ rad, commit agenta i commit samo sa bilješkama se ne računaju. Razlike su dvije:
+I ovdje uvijek postoji polje `upozorenja`. Svjež rad ima isti period i pravila kao ulaz za pisanje, pa treba puna git istorija, a tuđ rad, commit agenta i commit samo sa bilješkama, pitanjima o radu ili signalom se ne računaju. Razlike su tri:
 
 - kraj perioda je tačan trenutak, a ne zaokružen na minut, jer se traži baš rad iz ovog minuta;
-- provjera iz ADR 0002 se ne zove. Podatak sa pogotkom ne ide nikud, a rad je bio, pa se njegovo vrijeme računa.
+- provjera iz ADR 0002 se ne zove. Podatak sa pogotkom ne ide nikud, a rad je bio, pa se njegovo vrijeme računa;
+- uz svjež rad se gleda i signal rada, koji nije rad, nego samo signal: vrijeme posljednjeg commita koji je mijenjao `signal-rada.json` u kopiji privatnog repoa, ako je u periodu. Vrijeme upisano u fajl se ne čita, jer Claude na claude.ai nema pouzdan sat.
 
 ## Poruka
 

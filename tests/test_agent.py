@@ -317,7 +317,7 @@ class Repo:
         self.zapisi("napravi_sajt.py", LAZNA_PROVJERA)
         self.commit(autor=COVJEK)
 
-    def git(self, *argumenti: str, autor: str = COVJEK) -> None:
+    def git(self, *argumenti: str, autor: str = COVJEK, vrijeme: datetime | None = None) -> None:
         okruzenje = {
             **os.environ,
             "GIT_AUTHOR_NAME": autor,
@@ -325,6 +325,8 @@ class Repo:
             "GIT_COMMITTER_NAME": autor,
             "GIT_COMMITTER_EMAIL": "neko@example.com",
         }
+        if vrijeme:
+            okruzenje["GIT_AUTHOR_DATE"] = okruzenje["GIT_COMMITTER_DATE"] = vrijeme.isoformat()
         subprocess.run(["git", *argumenti], cwd=self.putanja, env=okruzenje, check=True)
 
     def zapisi(self, relativna: str, sadrzaj: str) -> None:
@@ -332,9 +334,23 @@ class Repo:
         putanja.parent.mkdir(parents=True, exist_ok=True)
         putanja.write_text(sadrzaj, encoding="utf-8")
 
-    def commit(self, autor: str) -> None:
+    def commit(self, autor: str, poruka="Promjena", vrijeme: datetime | None = None) -> None:
         self.git("add", "-A", autor=autor)
-        self.git("commit", "-q", "--allow-empty", "-m", "Promjena", autor=autor)
+        self.git("commit", "-q", "--allow-empty", "-m", poruka, autor=autor, vrijeme=vrijeme)
+
+    def signal(self, prije: timedelta, u_fajlu: datetime | None = None) -> datetime:
+        """Commit-uje signal rada kao Claude na claude.ai i vraća vrijeme commita.
+
+        Vrijeme u fajlu je namjerno drugačije od vremena commita, kao kad Claude pogriješi sat.
+        """
+        vrijeme = (datetime.now(UTC) - prije).replace(microsecond=0)
+        u_fajlu = u_fajlu or vrijeme + timedelta(hours=3)
+        self.zapisi(
+            "signal-rada.json",
+            json.dumps({"izvor": "claude.ai", "vrijeme": u_fajlu.isoformat(timespec="minutes")}),
+        )
+        self.commit(COVJEK, "Signal rada", vrijeme)
+        return vrijeme
 
     def biljeska(self, prije: timedelta, tekst="Tekst bilješke.", projekat=AKTIVAN) -> str:
         vrijeme = (datetime.now(UTC) - prije).isoformat(timespec="minutes")
@@ -1457,10 +1473,18 @@ NISU_RAD = {
     "commit-agenta": {"autor": AGENT},
     "commit-agenta-sa-kodom": {"autor": AGENT, "fajlovi": ("izvjestaji/2030-05-15.json", "kod.py")},
     "samo-biljeske": {"fajlovi": ("biljeske-sesija/a.json", "biljeske-sesija/b.json")},
+    "samo-pitanja-o-radu": {"fajlovi": ("pitanja-o-radu/a.json", "pitanja-o-radu/podesavanja.json")},
+    "samo-signal-rada": {"fajlovi": ("signal-rada.json",)},
+    "biljeske-pitanja-i-signal": {
+        "fajlovi": ("biljeske-sesija/a.json", "pitanja-o-radu/a.json", "signal-rada.json")
+    },
 }
 JESU_RAD = {
     "biljeska-i-kod": {"fajlovi": ("biljeske-sesija/a.json", "kod.py")},
+    "pitanje-i-kod": {"fajlovi": ("pitanja-o-radu/a.json", "kod.py")},
+    "signal-i-kod": {"fajlovi": ("signal-rada.json", "kod.py")},
     "slican-folder": {"fajlovi": ("biljeske-sesija-stare/a.json",)},
+    "signal-u-folderu": {"fajlovi": ("docs/signal-rada.json",)},
     "prazan-commit": {"fajlovi": ()},
 }
 
@@ -1579,6 +1603,67 @@ def test_svjez_rad_ne_broji_neaktivne_projekte_ni_rad_prije_izvjestaja(repo, git
     github.commit(timedelta(hours=1), repo=NEAKTIVAN_REPO)
 
     assert repo.svjez_rad() == {"ishod": "nema-svjezeg-rada", "upozorenja": []}
+
+
+def test_signal_rada_je_svjez_rad_po_vremenu_commita_a_ne_fajla(repo, github):
+    github.commit(timedelta(hours=2))
+    # Vrijeme u fajlu je u periodu i kasnije od svega ostalog, pa bi pobijedilo da se čita.
+    u_fajlu = datetime.now(UTC) - timedelta(minutes=5)
+    trenutak = repo.signal(timedelta(minutes=50), u_fajlu=u_fajlu)
+
+    izlaz = repo.svjez_rad()
+
+    assert izlaz["ishod"] == "svjez-rad"
+    assert datetime.fromisoformat(izlaz["vrijeme"]) == trenutak.replace(second=0)
+
+
+def test_signal_iz_buducnosti_po_fajlu_se_racuna_po_commitu(repo, github):
+    trenutak = repo.signal(timedelta(minutes=10))
+
+    assert datetime.fromisoformat(repo.svjez_rad()["vrijeme"]) == trenutak.replace(second=0)
+
+
+def test_svjez_rad_noviji_od_signala_je_posljednji_rad(repo, github):
+    repo.signal(timedelta(minutes=50), u_fajlu=datetime.now(UTC))
+    github.commit(timedelta(minutes=5))
+
+    izlaz = repo.svjez_rad()
+
+    ocekivano = datetime.now(UTC) - timedelta(minutes=5)
+    assert abs(datetime.fromisoformat(izlaz["vrijeme"]) - ocekivano) < timedelta(minutes=2)
+
+
+def test_posljednji_signal_se_racuna_a_ne_prvi(repo, github):
+    repo.signal(timedelta(minutes=50))
+    trenutak = repo.signal(timedelta(minutes=20))
+
+    assert datetime.fromisoformat(repo.svjez_rad()["vrijeme"]) == trenutak.replace(second=0)
+
+
+def test_signal_prije_prethodnog_izvjestaja_nije_svjez_rad(repo, github):
+    repo.signal(timedelta(hours=3))
+    repo.izvjestaj("2030-05-14", AGENT, datetime.now(UTC) - timedelta(hours=2))
+
+    assert repo.svjez_rad() == {"ishod": "nema-svjezeg-rada", "upozorenja": []}
+
+
+def test_samo_signal_rada_je_dan_bez_rada(repo, grok, github):
+    repo.signal(timedelta(minutes=10))
+
+    assert repo.pisi() == {"ishod": "dan-bez-rada", "upozorenja": []}
+    assert grok.zahtjevi == []
+
+
+def test_signal_rada_ne_ulazi_u_pisanje(repo, grok, github):
+    u_fajlu = datetime(2030, 5, 15, 21, 7, tzinfo=UTC)
+    repo.signal(timedelta(minutes=10), u_fajlu=u_fajlu)
+    biljeska = repo.biljeska(timedelta(hours=1))
+
+    assert repo.pisi()["ishod"] == "novi-fajl"
+    assert [b["tekst"] for b in grok.biljeske()] == [biljeska]
+    assert grok.github() == []
+    assert "claude.ai" not in grok.poslato()
+    assert "2030-05-15T21:07" not in grok.poslato()
 
 
 def test_svjez_rad_upozorava_na_neispravnu_biljesku_bez_vrijednosti(repo):
