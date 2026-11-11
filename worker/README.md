@@ -1,6 +1,6 @@
 # Worker
 
-Prima "završio" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, u 23:00 sam pokreće pisanje u GitHub Actions i šalje poruku iz rezultata (ADR 0004). Mentoru poruke šalje samo Worker.
+Prima "završio" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, poslije 23:00 sam pokreće pisanje u GitHub Actions kad prođe 40 minuta bez rada i šalje poruku iz rezultata (ADR 0004, ADR 0008). Mentoru poruke šalje samo Worker.
 
 Jutarnju provjeru radi `jutarnja-provjera.yml` u privatnom repou, a ne Worker, da bi otkrila i kvar Workera. Od Workera samo čita stanje dana (`GET /actions/stanje`).
 
@@ -18,26 +18,54 @@ Jutarnju provjeru radi `jutarnja-provjera.yml` u privatnom repou, a ne Worker, d
 
 Svaki upis prolazi samo ako red nije mijenjan od učitavanja, pa od istovremenih događaja prolazi jedan. Zato dvije poruke pokreću jedno pisanje, a dva rezultata šalju jednu poruku.
 
-Dan se računa po zoni `Europe/Belgrade`. "završio" važi za tekući dan, a rezultat za dan iz svog `datum`, pa rezultat stigao poslije ponoći zatvara svoj dan.
+## Radni dan
+
+Stanje u bazi i pravila računaju **radni dan** (ADR 0008), po zoni `Europe/Belgrade`. Datum radnog dana je kalendarski datum, osim od 0:00 do 1:00: tada je radni dan jučerašnji, ako još nije zatvoren. Od 1:00 radni dan je uvijek tekući kalendarski.
+
+- Aktivnost iz hooka, "završio" i dugme od 0:00 do 1:00 pripadaju jučerašnjem radnom danu dok nije zatvoren. Prva aktivnost poslije ponoći ne pravi novi dan dok je radni dan u toku.
+- Rezultat važi za dan iz svog `datum`, pa pisanje pokrenuto u 1:00 za jučerašnji dan teče dalje i zatvara svoj dan.
+- Dugme sa pitanja važi dok traje radni dan u kom je pitanje poslato, pa i poslije ponoći. Kad se dan zatvori, a najkasnije od 1:00, dugme dobija odgovor da je pitanje isteklo.
+- Izvještaj i "Danas nema zabilježenog rada" idu mentoru bez zvuka (`disable_notification`) kad je kalendarski datum slanja poslije datuma radnog dana. Važi i za ponovljeno slanje. Poruke Nemanji, pa i one u probnom režimu, uvijek stižu sa zvukom.
 
 Rezultat koji stigne van faze `pisanje` ništa ne radi. Ako slanje ne uspije, ruta vraća 502, dan ostaje `bez_poruke`, a tekst ostaje u bazi dok cron ne pošalje poruku.
 
 ## Cron
 
-Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lokalno vrijeme. Svaki put gleda današnji dan i ranije dane koji su još u fazi `pisanje` ili `bez_poruke`.
+Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lokalno vrijeme. Svaki put gleda današnji dan i ranije dane koji su još u fazi `pisanje` ili `bez_poruke`, a do 2:00 i jučerašnji dan.
 
 | Faza | Šta cron radi |
 |---|---|
-| `otvoren`, `neuspjeh` | od 23:00 do ponoći, ako cron već nije pokretao pisanje za taj dan, pokreće pisanje. U fazi `otvoren` ranije može da pokrene provjeru prije pitanja |
+| `otvoren`, `neuspjeh` | samostalno slanje poslije 23:00 (vidi ispod). U fazi `otvoren` od 16:00 do 22:30 može da pokrene provjeru prije pitanja |
 | `pisanje` | poslije 30 minuta bez rezultata prelazi u `neuspjeh` i upozorava Nemanju |
 | `bez_poruke` | ponavlja slanje, bez novog pisanja |
 | `zatvoren` | ništa |
 
-- **Jedan pokušaj.** Cron pokreće pisanje najviše jednom za dan, pa neuspjeh u 23:00 ne pravi novo pisanje svakih 5 minuta. "završio" i dalje pokreće novi pokušaj. Pisanje koje je "završio" pokrenuo prije toga ne troši pokušaj iz 23:00.
 - **Rokovi.** Računaju se po pravom vremenu, a ne po lokalnom satu, pa ih prelazak na ljetnje i zimsko vrijeme ne pomjera.
-- **Neuspjeh.** Mentor ne dobija ništa, pa ni "Danas nema zabilježenog rada". Dan ostaje nezatvoren, a rad ulazi u sljedeći izvještaj.
+- **Neuspjeh.** Mentor ne dobija ništa, pa ni "Danas nema zabilježenog rada". Dan ostaje nezatvoren, a rad ulazi u sljedeći izvještaj. Dok radni dan traje, upozorenje Nemanji nudi "završio" za novi pokušaj. Kad prođe, npr. poslije neuspjeha u 1:00, upozorenje kaže da rad ulazi u sljedeći izvještaj, jer bi "završio" tada pokrenulo novi dan.
 - **Upozorenje o slanju.** Ako slanje ne uspije od 23:00 nadalje, Nemanja jednom dobija upozorenje. Ranije se slanje samo ponavlja.
 - **Dvostruko slanje.** Cron ne ponavlja slanje pokušano u posljednjih minut, pa ne šalje poruku koju ruta baš tada šalje. Ako Worker padne poslije poruke, a prije upisa `zatvoren`, ili odgovor Telegrama ne stigne, poruka može da ode dvaput. Telegram nema ključ koji bi to spriječio, a dvije iste poruke su bolje od poruke koja nikad ne stigne.
+
+## Samostalno slanje poslije 23:00
+
+Prije 23:00 izvještaj nikad ne ide sam, ni kad je pauza duga. Poslije 23:00 ide sam tek kad prođe 40 minuta bez rada, najranije u 23:40, a najkasnije u 1:00 (ADR 0008).
+
+**T** je vrijeme posljednjeg rada koji Worker zna: posljednja aktivnost iz hooka ili rad koji je javila provjera. Dan bez ijednog signala iz hooka i bez rada iz provjere ima prvu provjeru u 23:40.
+
+Cron pokreće `provjera-svjezeg-rada.yml` u prvom cron-u u kom je vrijeme bar 23:40 i bar T + 40 minuta, a prošlo je i odlaganje poslije neuspjele provjere. Javljanje ide na istu rutu kao prije pitanja, a Worker odlučuje:
+
+| Javljanje | Šta Worker radi |
+|---|---|
+| `nema-svjezeg-rada` | pokreće pisanje. To je prvi samostalni pokušaj |
+| `svjez-rad`, rad mlađi od 40 minuta | T je vrijeme tog rada, a sljedeća provjera je u T + 40 minuta |
+| `svjez-rad`, rad star 40 minuta ili više | pokreće pisanje, kao `nema-svjezeg-rada` |
+| `neuspjeh` ili ništa u roku od 15 minuta | nova provjera poslije 30 minuta |
+
+- **Aktivnost za vrijeme provjere.** Pomjera T, a rezultat te provjere ne pokreće pisanje.
+- **1:00.** Ako radni dan nije zatvoren i pisanje nije u toku, pisanje kreće bez provjere. To je drugi samostalni pokušaj, i kad prvi nije ni krenuo. Cron koji izostane nadoknadi sljedeći, do 2:00. Pisanje koje je u 1:00 bilo u toku zauzima taj pokušaj, pa poslije njegovog neuspjeha nema novog.
+- **Najviše dva pokušaja.** Poslije neuspjeha prvog pokušaja nema novih provjera ni samostalnog slanja do 1:00. Poslije neuspjeha u 1:00 mentor ne dobija ništa, a Nemanja dobija upozorenje. "završio" i dalje uvijek pokreće novi pokušaj, a pisanje koje je ono pokrenulo ne troši samostalni pokušaj.
+- **Neuspjeh prije 23:00**, npr. poslije "Jesam", ukida samo nova pitanja tog dana. Samostalno slanje poslije 23:00 i u 1:00 i dalje važi.
+- **Pitanje bez odgovora** ne zaustavlja samostalno slanje, a ni "Nije" ga ne odlaže.
+- **Dan bez rada** se utvrđuje istim putem, pa "Danas nema zabilježenog rada" ne ide prije 23:40.
 
 ## Pitanje o završetku
 
@@ -45,7 +73,7 @@ Cron pokreće `provjera-svjezeg-rada.yml` u privatnom repou kad su ispunjeni svi
 
 - dan je u fazi `otvoren`, pa je isključeno sve što je u toku, neuspjeh i zatvoren dan;
 - vrijeme je između 16:00 i 22:30, obje granice uključene;
-- tog dana je bilo aktivnosti iz hooka. Dan bez signala nema pitanje, a pokriva ga slanje u 23:00;
+- tog dana je bilo aktivnosti iz hooka. Dan bez signala nema pitanje, a pokriva ga samostalno slanje poslije 23:00;
 - pauza je bar 60 minuta;
 - nema pitanja bez odgovora, ni provjere koja je u toku;
 - prošlo je odlaganje, ako ga ima.
@@ -55,7 +83,7 @@ Workflow javi ishod, a Worker odlučuje:
 | Javljanje | Šta Worker radi |
 |---|---|
 | `nema-svjezeg-rada` | šalje pitanje sa dugmadima "Jesam" i "Nije" |
-| `svjez-rad`, rad mlađi od 60 minuta | odlaže za 60 minuta od tog rada. Posljednja aktivnost se ne mijenja |
+| `svjez-rad`, rad mlađi od 60 minuta | odlaže za 60 minuta od tog rada. Posljednja aktivnost se ne mijenja, a rad se pamti i za samostalno slanje |
 | `svjez-rad`, rad star 60 minuta ili više | šalje pitanje |
 | `neuspjeh` ili ništa u roku od 15 minuta | nova provjera poslije 30 minuta, bez pitanja i bez poruke |
 
@@ -71,10 +99,10 @@ Dugmad:
 |---|---|
 | "Jesam" | isto što i poruka "završio": pokreće pisanje odmah, a drugi pritisak ne pokreće novo |
 | "Nije" | nova provjera za 30 minuta. Ako je u međuvremenu bilo aktivnosti, opet važi 60 minuta pauze. Provjera koja je u toku se odbacuje |
-| dugme od ranijeg dana | odgovor "Pitanje je isteklo.", bez ikakve radnje |
+| dugme od ranijeg radnog dana | odgovor "Pitanje je isteklo.", bez ikakve radnje |
 | dugme sa tuđeg chata | ignoriše se, bez odgovora |
 
-Na pitanje bez odgovora nema novog pitanja dok se ne pojavi nova aktivnost. Poslije nje opet važi 60 minuta pauze, a dugmad sa starog pitanja i dalje važe do ponoći. Pritisak zato ne zavisi od toga koje je pitanje posljednje.
+Na pitanje bez odgovora nema novog pitanja dok se ne pojavi nova aktivnost. Poslije nje opet važi 60 minuta pauze, a dugmad sa starog pitanja i dalje važe do kraja radnog dana. Pritisak zato ne zavisi od toga koje je pitanje posljednje.
 
 ## Ulazi
 
@@ -92,7 +120,7 @@ Traži zaglavlje `Authorization: Bearer <ključ za Actions>`.
 
 | `ishod` | Šta radi |
 |---|---|
-| `gotovo` | šalje `tekst` mentoru i zatvara dan. Važi i za izvještaj i za dan bez rada, a `tekst` je obavezan, do 4000 znakova |
+| `gotovo` | šalje `tekst` mentoru i zatvara dan, poslije ponoći bez zvuka. Važi i za izvještaj i za dan bez rada, a `tekst` je obavezan, do 4000 znakova |
 | `neuspjeh` | mentor ne dobija ništa, a Nemanja dobija upozorenje bez vrijednosti |
 
 | Status | Značenje |
@@ -104,7 +132,7 @@ Traži zaglavlje `Authorization: Bearer <ključ za Actions>`.
 
 ### `POST /actions/provjera`
 
-Traži isti ključ kao `/actions/rezultat`. Poziva ga `provjera-svjezeg-rada.yml`, koji `datum` i `oznaka` dobija od Workera.
+Traži isti ključ kao `/actions/rezultat`. Poziva ga `provjera-svjezeg-rada.yml`, koji `datum` i `oznaka` dobija od Workera. Ista ruta služi i provjeri prije pitanja i samostalnoj provjeri poslije 23:00.
 
 ```json
 { "datum": "2030-05-15", "oznaka": "1905430800000", "ishod": "svjez-rad", "vrijeme": "2030-05-15T14:30+02:00" }
@@ -138,7 +166,7 @@ Odgovor nosi samo datum i fazu, nikad tekst poruke. `faza` je jedna od faza iz t
 
 Traži zaglavlje `Authorization: Bearer <ključ hooka>`. Taj ključ ne radi ni na jednoj drugoj ruti, a nijedan drugi ključ ne radi na ovoj. Poziva ga hook iz [hookovi/aktivnost.py](../hookovi/aktivnost.py) (ADR 0005).
 
-Tijelo se ne čita, pa zahtjev ne može da unese ništa osim signala da je aktivnost bila. Vrijeme određuje Worker svojim satom i upisuje ga u današnji dan po zoni `Europe/Belgrade`. Prva aktivnost poslije ponoći pravi red za novi dan, a jučerašnji dan ostaje kakav je bio.
+Tijelo se ne čita, pa zahtjev ne može da unese ništa osim signala da je aktivnost bila. Vrijeme određuje Worker svojim satom i upisuje ga u radni dan. Od 0:00 do 1:00 to je jučerašnji dan dok nije zatvoren, a od 1:00, ili kad je jučerašnji zatvoren, prva aktivnost pravi red za novi dan.
 
 Aktivnost mijenja samo vrijeme. Zatvoren dan ostaje zatvoren, pisanje koje je u toku teče dalje, a ništa se ne šalje.
 

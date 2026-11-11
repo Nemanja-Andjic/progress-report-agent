@@ -10,19 +10,21 @@ export interface StanjeDana {
   tekst: string | null;
   // Trenutak kad je pisanje pokrenuto ili kad je slanje poruke posljednji put pokušano.
   uTokuOd: number | null;
-  // Cron je već pokrenuo pisanje za ovaj dan, pa ga više ne pokreće.
-  pokusaj23: boolean;
+  // Koliko je puta agent sam pokrenuo pisanje: 1 poslije 40 minuta bez rada, 2 u 1:00 (ADR 0008).
+  samostalniPokusaji: number;
   // Nemanja je već upozoren da poruka nije poslata.
   upozoren: boolean;
   // Trenutak posljednjeg javljanja hooka tog dana, po satu Workera (ADR 0005).
   posljednjaAktivnost: number | null;
+  // Najkasniji rad koji je javila provjera: svjež rad ili signal rada. Nikad nije iz budućnosti.
+  radIzProvjere: number | null;
   // Trenutak pokretanja provjere koja se još nije javila. Ujedno je i oznaka te provjere.
   provjeraOd: number | null;
   // Trenutak slanja pitanja bez odgovora. Nova aktivnost ga ne briše, nego se poredi sa njim.
   pitanjeOd: number | null;
   // Trenutak posljednjeg odgovora "Nije".
   nijeOd: number | null;
-  // Prije ovog trenutka nema nove provjere: neuspjela provjera ili svjež rad.
+  // Prije ovog trenutka nema nove provjere, jer prethodna nije uspjela ili pitanje nije poslato.
   odlozenoDo: number | null;
 }
 
@@ -55,7 +57,8 @@ export interface LokalnoVrijeme {
 export type Radnja =
   | { vrsta: "pokreni_pisanje"; datum: string }
   | { vrsta: "posalji_nemanji"; tekst: string }
-  | { vrsta: "posalji_mentoru"; tekst: string }
+  // Bez zvuka kad je kalendarski datum slanja poslije datuma radnog dana, da ne probudi mentora.
+  | { vrsta: "posalji_mentoru"; tekst: string; bezZvuka: boolean }
   | { vrsta: "pokreni_provjeru"; datum: string; oznaka: string }
   | { vrsta: "posalji_pitanje"; datum: string; tekst: string }
   | { vrsta: "odgovori_na_dugme"; id: string; tekst?: string };
@@ -66,6 +69,11 @@ export interface Prelaz {
 }
 
 const SAT_SLANJA = 23;
+const KRAJ_RADNOG_DANA_SAT = 1;
+// Do ovog sata cron gleda i jučerašnji radni dan, zbog pokušaja iz 1:00.
+export const KRAJ_DRUGOG_POKUSAJA_SAT = 2;
+const POCETAK_SAMOSTALNOG_MINUT = 23 * 60 + 40;
+const PAUZA_SAMOSTALNOG_MS = 40 * 60_000;
 const ROK_PISANJA_MS = 30 * 60_000;
 // Kraće od razmaka između cron-ova, a duže od roka poziva Telegrama. Cron tako ne šalje poruku
 // koju neko baš tada šalje, a ipak ponavlja neuspjelo slanje već sljedeći put.
@@ -99,15 +107,34 @@ export function lokalnoVrijeme(sada: Date): LokalnoVrijeme {
   };
 }
 
+// Datum pomjeren za dati broj dana. Podne po UTC-u ne zavisi od ljetnjeg i zimskog vremena.
+export function pomjerenDatum(datum: string, dana: number): string {
+  const podne = new Date(`${datum}T12:00:00Z`);
+  podne.setUTCDate(podne.getUTCDate() + dana);
+  return podne.toISOString().slice(0, 10);
+}
+
+// Od 0:00 do 1:00 radni dan je jučerašnji dok nije zatvoren, a inače tekući kalendarski (ADR 0008).
+export function datumRadnogDana(lokalno: LokalnoVrijeme, fazaJuce: Faza): string {
+  if (lokalno.sat < KRAJ_RADNOG_DANA_SAT && fazaJuce !== "zatvoren") return pomjerenDatum(lokalno.datum, -1);
+  return lokalno.datum;
+}
+
+function jeRadniDan(stanje: StanjeDana, lokalno: LokalnoVrijeme): boolean {
+  if (stanje.datum === lokalno.datum) return true;
+  return stanje.datum === pomjerenDatum(lokalno.datum, -1) && datumRadnogDana(lokalno, stanje.faza) === stanje.datum;
+}
+
 export function noviDan(datum: string): StanjeDana {
   return {
     datum,
     faza: "otvoren",
     tekst: null,
     uTokuOd: null,
-    pokusaj23: false,
+    samostalniPokusaji: 0,
     upozoren: false,
     posljednjaAktivnost: null,
+    radIzProvjere: null,
     provjeraOd: null,
     pitanjeOd: null,
     nijeOd: null,
@@ -120,15 +147,48 @@ function citljivDatum(datum: string): string {
   return `${Number(dan)}.${Number(mjesec)}.${godina}.`;
 }
 
+// Dio radnog dana po lokalnom satu. "samostalno" traje od 23:00 do 1:00, a "drugi_pokusaj" od 1:00
+// do 2:00, cijeli sat, jer jedan cron može da izostane.
+type DioRadnogDana = "pitanja" | "samostalno" | "drugi_pokusaj" | null;
+
+function dioRadnogDana(stanje: StanjeDana, lokalno: LokalnoVrijeme): DioRadnogDana {
+  const minut = lokalno.sat * 60 + lokalno.minut;
+  if (lokalno.datum === stanje.datum) {
+    if (minut >= POCETAK_PITANJA_MINUT && minut <= KRAJ_PITANJA_MINUT) return "pitanja";
+    return lokalno.sat >= SAT_SLANJA ? "samostalno" : null;
+  }
+  if (lokalno.datum !== pomjerenDatum(stanje.datum, 1)) return null;
+  if (lokalno.sat < KRAJ_RADNOG_DANA_SAT) return "samostalno";
+  return lokalno.sat < KRAJ_DRUGOG_POKUSAJA_SAT ? "drugi_pokusaj" : null;
+}
+
+// Provjera u toku se odbacuje, jer njen rezultat ne smije da odluči o danu koji je već u pisanju.
+function pokreniPisanje(stanje: StanjeDana, lokalno: LokalnoVrijeme, izmjene: Partial<StanjeDana> = {}): Prelaz {
+  return {
+    stanje: { ...stanje, ...izmjene, faza: "pisanje", uTokuOd: lokalno.trenutak, provjeraOd: null },
+    radnje: [{ vrsta: "pokreni_pisanje", datum: stanje.datum }],
+  };
+}
+
+function porukaMentoru(stanje: StanjeDana, tekst: string, lokalno: LokalnoVrijeme): Radnja {
+  return { vrsta: "posalji_mentoru", tekst, bezZvuka: lokalno.datum > stanje.datum };
+}
+
 function poNemanji(stanje: StanjeDana, tekst: string): Prelaz {
   return { stanje, radnje: [{ vrsta: "posalji_nemanji", tekst }] };
 }
 
 // Mentor ne dobija ništa, pa ni "nema rada": rad možda postoji, a izvještaj nije napisan.
-function neuspjeh(stanje: StanjeDana, opis: string): Prelaz {
+// Kad radni dan prođe, "završio" bi pokrenulo novi dan, pa se ne nudi. Pisanje koje padne od 1:00
+// je bilo u toku u 1:00 ili je to pokušaj iz 1:00, pa poslije njega nema samostalnog pokušaja.
+function neuspjeh(stanje: StanjeDana, opis: string, lokalno: LokalnoVrijeme): Prelaz {
+  const poslije1 = dioRadnogDana(stanje, lokalno) === "drugi_pokusaj";
+  const dalje = jeRadniDan(stanje, lokalno)
+    ? 'Pošalji "završio" za novi pokušaj.'
+    : "Rad ulazi u sljedeći izvještaj.";
   return poNemanji(
-    { ...stanje, faza: "neuspjeh", uTokuOd: null },
-    `Pisanje izvještaja za ${citljivDatum(stanje.datum)} ${opis}. Pošalji "završio" za novi pokušaj.`,
+    { ...stanje, faza: "neuspjeh", uTokuOd: null, ...(poslije1 ? { samostalniPokusaji: 2 } : {}) },
+    `Pisanje izvještaja za ${citljivDatum(stanje.datum)} ${opis}. ${dalje}`,
   );
 }
 
@@ -141,14 +201,13 @@ function zavrsio(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
     case "zatvoren":
       return poNemanji(stanje, "Izvještaj za danas je već poslat.");
     case "otvoren":
-    case "neuspjeh":
+    case "neuspjeh": {
+      const prelaz = pokreniPisanje(stanje, lokalno);
       return {
-        stanje: { ...stanje, faza: "pisanje", uTokuOd: lokalno.trenutak },
-        radnje: [
-          { vrsta: "pokreni_pisanje", datum: stanje.datum },
-          { vrsta: "posalji_nemanji", tekst: "Krećem sa pisanjem izvještaja." },
-        ],
+        stanje: prelaz.stanje,
+        radnje: [...prelaz.radnje, { vrsta: "posalji_nemanji", tekst: "Krećem sa pisanjem izvještaja." }],
       };
+    }
   }
 }
 
@@ -164,24 +223,42 @@ function rokProvjere(stanje: StanjeDana): number | null {
   if (stanje.pitanjeOd !== null && aktivnost <= stanje.pitanjeOd) return null;
   const rok =
     stanje.nijeOd !== null && aktivnost <= stanje.nijeOd ? stanje.nijeOd + POSLIJE_NIJE_MS : aktivnost + PAUZA_MS;
-  return Math.max(rok, stanje.odlozenoDo ?? 0);
+  return Math.max(rok, (stanje.radIzProvjere ?? 0) + PAUZA_MS, stanje.odlozenoDo ?? 0);
 }
 
-function cronProvjere(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
+// Poslije 23:00: T je posljednji rad koji Worker zna, a provjera kreće najranije u 23:40 i u T + 40.
+// Dan bez ijednog signala iz hooka i bez rada iz provjere ima T = 0, pa mu je prva provjera u 23:40.
+function rokSamostalneProvjere(stanje: StanjeDana): number {
+  const posljednjiRad = Math.max(stanje.posljednjaAktivnost ?? 0, stanje.radIzProvjere ?? 0);
+  return Math.max(posljednjiRad + PAUZA_SAMOSTALNOG_MS, stanje.odlozenoDo ?? 0);
+}
+
+function pokreniProvjeru(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
+  return {
+    stanje: { ...stanje, provjeraOd: lokalno.trenutak },
+    radnje: [{ vrsta: "pokreni_provjeru", datum: stanje.datum, oznaka: String(lokalno.trenutak) }],
+  };
+}
+
+function cronProvjere(stanje: StanjeDana, lokalno: LokalnoVrijeme, dio: DioRadnogDana): Prelaz {
   const nista = { stanje, radnje: [] };
   if (stanje.provjeraOd !== null) {
     if (lokalno.trenutak - stanje.provjeraOd < ROK_PROVJERE_MS) return nista;
     return { stanje: provjeraPala(stanje, lokalno), radnje: [] };
   }
 
-  const minut = lokalno.sat * 60 + lokalno.minut;
-  if (stanje.datum !== lokalno.datum || minut < POCETAK_PITANJA_MINUT || minut > KRAJ_PITANJA_MINUT) return nista;
+  if (dio === "samostalno") {
+    // Poslije neuspjeha prvog samostalnog pokušaja sljedeći je tek u 1:00.
+    const prerano = lokalno.datum === stanje.datum && lokalno.sat * 60 + lokalno.minut < POCETAK_SAMOSTALNOG_MINUT;
+    if (stanje.samostalniPokusaji > 0 || prerano || lokalno.trenutak < rokSamostalneProvjere(stanje)) return nista;
+    return pokreniProvjeru(stanje, lokalno);
+  }
+
+  // Poslije neuspjeha tog dana nema novih pitanja.
+  if (dio !== "pitanja" || stanje.faza !== "otvoren") return nista;
   const rok = rokProvjere(stanje);
   if (rok === null || lokalno.trenutak < rok) return nista;
-  return {
-    stanje: { ...stanje, provjeraOd: lokalno.trenutak },
-    radnje: [{ vrsta: "pokreni_provjeru", datum: stanje.datum, oznaka: String(lokalno.trenutak) }],
-  };
+  return pokreniProvjeru(stanje, lokalno);
 }
 
 function rezultatProvjere(
@@ -189,26 +266,33 @@ function rezultatProvjere(
   dogadjaj: Extract<Dogadjaj, { vrsta: "provjera" }>,
   lokalno: LokalnoVrijeme,
 ): Prelaz {
+  const nista = { stanje, radnje: [] };
   // Javljanje stare provjere ne smije da odluči umjesto one koja je sad u toku.
-  if (stanje.faza !== "otvoren" || stanje.provjeraOd === null || String(stanje.provjeraOd) !== dogadjaj.oznaka) {
-    return { stanje, radnje: [] };
-  }
+  if (stanje.provjeraOd === null || String(stanje.provjeraOd) !== dogadjaj.oznaka) return nista;
+  if (stanje.faza !== "otvoren" && stanje.faza !== "neuspjeh") return nista;
   // Rok važi i kad cron još nije stigao. Zato pitanje nikad ne krene poslije 22:45.
   const zakasnila = lokalno.trenutak - stanje.provjeraOd >= ROK_PROVJERE_MS;
   if (dogadjaj.ishod === "neuspjeh" || zakasnila) return { stanje: provjeraPala(stanje, lokalno), radnje: [] };
 
-  const gotova = { ...stanje, provjeraOd: null };
+  // Provjera prije pitanja kreće najkasnije u 22:30 i zakasni u 22:45, a samostalna kreće od 23:40.
+  // Zato javljanje koje nije zakasnilo i stigne od 23:00 pripada samostalnoj provjeri.
+  const dio = dioRadnogDana(stanje, lokalno);
+  const samostalno = dio === "samostalno" || dio === "drugi_pokusaj";
+  const pauza = samostalno ? PAUZA_SAMOSTALNOG_MS : PAUZA_MS;
+  let gotova: StanjeDana = { ...stanje, provjeraOd: null };
   if (dogadjaj.ishod === "svjez-rad") {
-    // Period izvještaja traje cijeli dan, pa rad stariji od pauze više ne odlaže pitanje.
-    // Inače bi jutarnji commit zauvijek držao pitanje. Vrijeme iz budućnosti ne odlaže duže od pauze.
-    const odlozeno = Math.min(dogadjaj.vrijeme, lokalno.trenutak) + PAUZA_MS;
-    if (odlozeno > lokalno.trenutak) {
-      return { stanje: { ...gotova, odlozenoDo: Math.max(stanje.odlozenoDo ?? 0, odlozeno) }, radnje: [] };
-    }
+    // Vrijeme iz budućnosti ne odlaže duže od pauze.
+    const rad = Math.min(dogadjaj.vrijeme, lokalno.trenutak);
+    gotova = { ...gotova, radIzProvjere: Math.max(stanje.radIzProvjere ?? 0, rad) };
+    // Prije pitanja se računa samo rad mlađi od pauze, inače bi jutarnji commit zauvijek držao pitanje.
+    if (rad + pauza > lokalno.trenutak) return { stanje: gotova, radnje: [] };
   }
 
-  // Aktivnost dok je provjera trajala znači da pauze više nema, pa cron čeka novih 60 minuta.
+  // Aktivnost dok je provjera trajala znači da pauze više nema, pa cron opet čeka cijelu pauzu.
   if ((stanje.posljednjaAktivnost ?? 0) > stanje.provjeraOd) return { stanje: gotova, radnje: [] };
+  // Javljanje poslije 1:00, prije crona, pokreće pokušaj iz 1:00, pa trećeg nema.
+  if (samostalno) return pokreniPisanje(gotova, lokalno, { samostalniPokusaji: dio === "drugi_pokusaj" ? 2 : 1 });
+  if (stanje.faza !== "otvoren") return { stanje: gotova, radnje: [] };
   return {
     stanje: { ...gotova, pitanjeOd: lokalno.trenutak },
     radnje: [{ vrsta: "posalji_pitanje", datum: stanje.datum, tekst: "Da li si završio za danas?" }],
@@ -217,7 +301,8 @@ function rezultatProvjere(
 
 function dugme(stanje: StanjeDana, dogadjaj: Extract<Dogadjaj, { vrsta: "dugme" }>, lokalno: LokalnoVrijeme): Prelaz {
   const { id } = dogadjaj;
-  if (dogadjaj.datum !== lokalno.datum || stanje.datum !== lokalno.datum) {
+  // Dugme važi za radni dan u kom je pitanje poslato, pa i poslije ponoći, dok taj dan traje.
+  if (dogadjaj.datum !== stanje.datum || !jeRadniDan(stanje, lokalno)) {
     return { stanje, radnje: [{ vrsta: "odgovori_na_dugme", id, tekst: PITANJE_ISTEKLO }] };
   }
   if (dogadjaj.odgovor === "jesam") {
@@ -239,24 +324,22 @@ function cron(stanje: StanjeDana, lokalno: LokalnoVrijeme): Prelaz {
 
   switch (stanje.faza) {
     case "pisanje":
-      return proslo < ROK_PISANJA_MS ? nista : neuspjeh(stanje, "se nije javilo u roku");
+      return proslo < ROK_PISANJA_MS ? nista : neuspjeh(stanje, "se nije javilo u roku", lokalno);
     case "bez_poruke":
       if (stanje.tekst === null || proslo < RAZMAK_SLANJA_MS) return nista;
       return {
         stanje: { ...stanje, uTokuOd: lokalno.trenutak },
-        radnje: [{ vrsta: "posalji_mentoru", tekst: stanje.tekst }],
+        radnje: [porukaMentoru(stanje, stanje.tekst, lokalno)],
       };
     case "otvoren":
-    case "neuspjeh":
-      // Cijeli sat, a ne samo 23:00, jer jedan cron može da izostane. Oznaka čuva da krene jednom.
-      if (stanje.datum === lokalno.datum && lokalno.sat === SAT_SLANJA && !stanje.pokusaj23) {
-        return {
-          stanje: { ...stanje, faza: "pisanje", uTokuOd: lokalno.trenutak, pokusaj23: true },
-          radnje: [{ vrsta: "pokreni_pisanje", datum: stanje.datum }],
-        };
+    case "neuspjeh": {
+      // U 1:00 pisanje kreće bez provjere, i kad prvi samostalni pokušaj nije ni krenuo.
+      const dio = dioRadnogDana(stanje, lokalno);
+      if (dio === "drugi_pokusaj") {
+        return stanje.samostalniPokusaji < 2 ? pokreniPisanje(stanje, lokalno, { samostalniPokusaji: 2 }) : nista;
       }
-      // Poslije neuspjeha tog dana nema novih pitanja.
-      return stanje.faza === "otvoren" ? cronProvjere(stanje, lokalno) : nista;
+      return cronProvjere(stanje, lokalno, dio);
+    }
     case "zatvoren":
       return nista;
   }
@@ -277,8 +360,8 @@ export function primijeni(stanje: StanjeDana, dogadjaj: Dogadjaj, lokalno: Lokal
 
   switch (dogadjaj.vrsta) {
     case "zavrsio":
-      // "završio" uvijek važi za tekući dan, a ostali događaji za dan kom pripadaju.
-      return zavrsio(stanje.datum === lokalno.datum ? stanje : noviDan(lokalno.datum), lokalno);
+      // "završio" uvijek važi za radni dan, a ostali događaji za dan kom pripadaju.
+      return zavrsio(jeRadniDan(stanje, lokalno) ? stanje : noviDan(lokalno.datum), lokalno);
 
     case "cron":
       return cron(stanje, lokalno);
@@ -289,15 +372,15 @@ export function primijeni(stanje: StanjeDana, dogadjaj: Dogadjaj, lokalno: Lokal
 
     case "rezultat":
       if (stanje.faza !== "pisanje") return nista;
-      if (dogadjaj.ishod === "neuspjeh") return neuspjeh(stanje, "nije uspjelo");
+      if (dogadjaj.ishod === "neuspjeh") return neuspjeh(stanje, "nije uspjelo", lokalno);
       return {
         stanje: { ...stanje, faza: "bez_poruke", tekst: dogadjaj.tekst, uTokuOd: lokalno.trenutak },
-        radnje: [{ vrsta: "posalji_mentoru", tekst: dogadjaj.tekst }],
+        radnje: [porukaMentoru(stanje, dogadjaj.tekst, lokalno)],
       };
 
     case "pokretanje_nije_uspjelo":
       if (stanje.faza !== "pisanje") return nista;
-      return neuspjeh(stanje, "nije pokrenuto");
+      return neuspjeh(stanje, "nije pokrenuto", lokalno);
 
     case "poruka_poslata":
       if (stanje.faza !== "bez_poruke") return nista;

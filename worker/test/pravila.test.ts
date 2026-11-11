@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lokalnoVrijeme, noviDan, primijeni, type StanjeDana } from "../src/pravila";
+import { datumRadnogDana, lokalnoVrijeme, noviDan, primijeni, type StanjeDana } from "../src/pravila";
 
 const DATUM = "2030-05-15";
 const dvije = (broj: number) => String(broj).padStart(2, "0");
@@ -36,15 +36,15 @@ describe('"završio"', () => {
     expect(radnje).toEqual([{ vrsta: "posalji_nemanji", tekst: "Izvještaj za danas je već poslat." }]);
   });
 
-  it("poslije ponoći važi za novi dan, i kad je juče zatvoreno", () => {
+  it("poslije ponoći važi za novi dan kad je juče zatvoreno", () => {
     const { stanje, radnje } = primijeni(dan("zatvoren"), zavrsio, u("2030-05-16", 0, 1));
 
     expect(stanje).toMatchObject({ datum: "2030-05-16", faza: "pisanje" });
     expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: "2030-05-16" });
   });
 
-  it("poslije ponoći ne čeka jučerašnje pisanje", () => {
-    const { radnje } = primijeni(dan("pisanje"), zavrsio, u("2030-05-16", 0, 1));
+  it("od 1:00 ne čeka jučerašnje pisanje", () => {
+    const { radnje } = primijeni(dan("pisanje"), zavrsio, u("2030-05-16", 1, 0));
 
     expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: "2030-05-16" });
   });
@@ -66,13 +66,67 @@ describe('"završio"', () => {
   });
 });
 
+describe("radni dan", () => {
+  const SUTRA = "2030-05-16";
+
+  it.each([
+    ["u 23:59 je današnji", DATUM, 23, 59, "otvoren", DATUM],
+    ["u 0:00 je jučerašnji dok nije zatvoren", SUTRA, 0, 0, "otvoren", DATUM],
+    ["u 0:59 je jučerašnji i dok pisanje teče", SUTRA, 0, 59, "pisanje", DATUM],
+    ["u 0:30 je jučerašnji i poslije neuspjeha", SUTRA, 0, 30, "neuspjeh", DATUM],
+    ["u 0:30 je današnji kad je juče zatvoreno", SUTRA, 0, 30, "zatvoren", SUTRA],
+    ["od 1:00 je uvijek današnji", SUTRA, 1, 0, "otvoren", SUTRA],
+  ] as const)("%s", (_ime, datum, sat, minut, fazaJuce, ocekivan) => {
+    expect(datumRadnogDana(u(datum, sat, minut), fazaJuce)).toBe(ocekivan);
+  });
+
+  it("prvi dan u godini poslije ponoći je 31. decembar", () => {
+    expect(datumRadnogDana(lokalnoVrijeme(new Date("2031-01-01T00:30:00+01:00")), "otvoren")).toBe("2030-12-31");
+  });
+
+  it('"završio" u 0:30 zatvara jučerašnji radni dan', () => {
+    const { stanje, radnje } = primijeni(noviDan(DATUM), zavrsio, u(SUTRA, 0, 30));
+
+    expect(stanje).toMatchObject({ datum: DATUM, faza: "pisanje" });
+    expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: DATUM });
+  });
+
+  it('"završio" u 0:30 dok jučerašnje pisanje teče samo javlja da je u toku', () => {
+    const { radnje } = primijeni(dan("pisanje"), zavrsio, u(SUTRA, 0, 30));
+
+    expect(radnje).toEqual([{ vrsta: "posalji_nemanji", tekst: "Pisanje izvještaja je već u toku." }]);
+  });
+
+  it('neuspjeh poslije ponoći, dok radni dan traje, i dalje nudi "završio"', () => {
+    const { radnje } = primijeni(dan("pisanje"), { vrsta: "rezultat", ishod: "neuspjeh" }, u(SUTRA, 0, 30));
+
+    expect(radnje).toEqual([
+      {
+        vrsta: "posalji_nemanji",
+        tekst: 'Pisanje izvještaja za 15.5.2030. nije uspjelo. Pošalji "završio" za novi pokušaj.',
+      },
+    ]);
+  });
+
+  it('neuspjeh od 1:00 ne nudi "završio", jer bi ono pokrenulo novi dan', () => {
+    const { radnje } = primijeni(dan("pisanje"), { vrsta: "rezultat", ishod: "neuspjeh" }, u(SUTRA, 1, 10));
+
+    expect(radnje).toEqual([
+      {
+        vrsta: "posalji_nemanji",
+        tekst: "Pisanje izvještaja za 15.5.2030. nije uspjelo. Rad ulazi u sljedeći izvještaj.",
+      },
+    ]);
+  });
+});
+
 describe("aktivnost", () => {
   const aktivnost = { vrsta: "aktivnost" } as const;
 
   it.each(["otvoren", "pisanje", "bez_poruke", "neuspjeh", "zatvoren"] as const)(
     "u fazi %s pamti samo vrijeme i ne radi ništa drugo",
     (faza) => {
-      const pocetno = { ...dan(faza, "Tekst"), uTokuOd: 123, pokusaj23: true, upozoren: true };
+      const pocetno = { ...dan(faza, "Tekst"), uTokuOd: 123, samostalniPokusaji: 1, upozoren: true };
       const { stanje, radnje } = primijeni(pocetno, aktivnost, u(DATUM, 14, 30));
 
       expect(stanje).toEqual({ ...pocetno, posljednjaAktivnost: u(DATUM, 14, 30).trenutak });
@@ -123,14 +177,14 @@ describe("rezultat iz Actions", () => {
     const { stanje, radnje } = primijeni(dan("pisanje"), gotovo, u());
 
     expect(stanje).toMatchObject({ faza: "bez_poruke", tekst: "Tekst poruke" });
-    expect(radnje).toEqual([{ vrsta: "posalji_mentoru", tekst: "Tekst poruke" }]);
+    expect(radnje).toEqual([{ vrsta: "posalji_mentoru", tekst: "Tekst poruke", bezZvuka: false }]);
   });
 
   it("dan bez rada se zatvara kao i svaki drugi: poruka, pa zatvoren dan", () => {
     const tekst = "Danas nema zabilježenog rada";
     const poslije = primijeni(dan("pisanje"), { vrsta: "rezultat", ishod: "gotovo", tekst }, u());
 
-    expect(poslije.radnje).toEqual([{ vrsta: "posalji_mentoru", tekst }]);
+    expect(poslije.radnje).toEqual([{ vrsta: "posalji_mentoru", tekst, bezZvuka: false }]);
     expect(primijeni(poslije.stanje, { vrsta: "poruka_poslata" }, u()).stanje.faza).toBe("zatvoren");
   });
 
@@ -171,6 +225,30 @@ describe("rezultat iz Actions", () => {
   });
 });
 
+describe("bez zvuka", () => {
+  const gotovo = { vrsta: "rezultat", ishod: "gotovo", tekst: "Tekst" } as const;
+
+  it("poruka poslata istog dana ide sa zvukom, i u 23:59", () => {
+    expect(primijeni(dan("pisanje"), gotovo, u(DATUM, 23, 59)).radnje).toEqual([
+      { vrsta: "posalji_mentoru", tekst: "Tekst", bezZvuka: false },
+    ]);
+  });
+
+  it("poruka poslata poslije ponoći ide bez zvuka", () => {
+    expect(primijeni(dan("pisanje"), gotovo, u("2030-05-16", 0, 0)).radnje).toEqual([
+      { vrsta: "posalji_mentoru", tekst: "Tekst", bezZvuka: true },
+    ]);
+  });
+
+  it("ponovljeno slanje poslije ponoći ide bez zvuka, iako je prvo bilo prije", () => {
+    const napisano = primijeni(dan("pisanje"), gotovo, u(DATUM, 23, 58)).stanje;
+
+    expect(primijeni(napisano, cron, u("2030-05-16", 0, 5)).radnje).toEqual([
+      { vrsta: "posalji_mentoru", tekst: "Tekst", bezZvuka: true },
+    ]);
+  });
+});
+
 describe("posljedice radnji", () => {
   it("poslata poruka zatvara dan i briše tekst", () => {
     const { stanje, radnje } = primijeni(dan("bez_poruke", "Tekst"), { vrsta: "poruka_poslata" }, u());
@@ -192,75 +270,240 @@ describe("posljedice radnji", () => {
   });
 });
 
-describe("cron u 23:00", () => {
-  it("na otvoren dan pokreće pisanje za taj datum", () => {
-    const { stanje, radnje } = primijeni(noviDan(DATUM), cron, u(DATUM, 23, 0));
-
-    expect(stanje.faza).toBe("pisanje");
-    expect(radnje).toEqual([{ vrsta: "pokreni_pisanje", datum: DATUM }]);
-  });
-
-  it("u 22:55 još ne pokreće ništa", () => {
-    const pocetno = noviDan(DATUM);
-    const { stanje, radnje } = primijeni(pocetno, cron, u(DATUM, 22, 55));
-
-    expect(stanje).toBe(pocetno);
-    expect(radnje).toEqual([]);
-  });
-
-  it("kreće i ako je cron u 23:00 izostao", () => {
-    const { radnje } = primijeni(noviDan(DATUM), cron, u(DATUM, 23, 40));
-
-    expect(radnje).toEqual([{ vrsta: "pokreni_pisanje", datum: DATUM }]);
-  });
-
-  it("poslije ponoći ne pokreće pisanje za juče", () => {
-    const { radnje } = primijeni(noviDan(DATUM), cron, u("2030-05-16", 23, 0));
-
-    expect(radnje).toEqual([]);
-  });
-
-  it.each(["zatvoren", "pisanje"] as const)("u fazi %s ne pokreće pisanje", (faza) => {
-    const pocetno = { ...dan(faza), uTokuOd: u(DATUM, 23, 0).trenutak };
-    const { stanje, radnje } = primijeni(pocetno, cron, u(DATUM, 23, 0));
-
-    expect(stanje).toBe(pocetno);
-    expect(radnje).toEqual([]);
-  });
-
-  it("poslije ranijeg neuspjeha pokušava još jednom", () => {
-    const { stanje, radnje } = primijeni(dan("neuspjeh"), cron, u(DATUM, 23, 0));
-
-    expect(stanje.faza).toBe("pisanje");
-    expect(radnje).toEqual([{ vrsta: "pokreni_pisanje", datum: DATUM }]);
-  });
-
-  it("poslije neuspjeha pokušaja iz 23:00 ne pokušava ponovo, a završio još radi", () => {
-    const pokusaj = primijeni(noviDan(DATUM), cron, u(DATUM, 23, 0));
-    const pao = primijeni(pokusaj.stanje, { vrsta: "rezultat", ishod: "neuspjeh" }, u(DATUM, 23, 5));
-
-    expect(primijeni(pao.stanje, cron, u(DATUM, 23, 10)).radnje).toEqual([]);
-    expect(primijeni(pao.stanje, zavrsio, u(DATUM, 23, 15)).radnje).toContainEqual({
-      vrsta: "pokreni_pisanje",
-      datum: DATUM,
-    });
-  });
-
-  it("neuspjeh pisanja pokrenutog prije 23:00 ne troši pokušaj iz 23:00", () => {
-    const pisanje = primijeni(noviDan(DATUM), zavrsio, u(DATUM, 22, 50));
-    const pao = primijeni(pisanje.stanje, cron, u(DATUM, 23, 20));
-
-    expect(pao.stanje.faza).toBe("neuspjeh");
-    expect(primijeni(pao.stanje, cron, u(DATUM, 23, 25)).radnje).toEqual([
-      { vrsta: "pokreni_pisanje", datum: DATUM },
+describe("samostalno slanje", () => {
+  const SUTRA = "2030-05-16";
+  const aktivnost = { vrsta: "aktivnost" } as const;
+  const neuspjeh = { vrsta: "rezultat", ishod: "neuspjeh" } as const;
+  const aktivanU = (sat: number, minut = 0, datum = DATUM) =>
+    primijeni(noviDan(DATUM), aktivnost, u(datum, sat, minut)).stanje;
+  const vrste = (radnje: { vrsta: string }[]) => radnje.map((radnja) => radnja.vrsta);
+  const bezRada = (oznaka: string) => ({ vrsta: "provjera", oznaka, ishod: "nema-svjezeg-rada" }) as const;
+  const sRadom = (oznaka: string, vrijeme: number) =>
+    ({ vrsta: "provjera", oznaka, ishod: "svjez-rad", vrijeme }) as const;
+  const palo = (oznaka: string) => ({ vrsta: "provjera", oznaka, ishod: "neuspjeh" }) as const;
+  const POKRENI = { vrsta: "pokreni_pisanje", datum: DATUM };
+  // Cron u datom trenutku mora da pokrene provjeru za radni dan.
+  const provjeraU = (stanje: StanjeDana, datum: string, sat: number, minut: number) => {
+    const { stanje: poslije, radnje } = primijeni(stanje, cron, u(datum, sat, minut));
+    expect(radnje).toEqual([
+      { vrsta: "pokreni_provjeru", datum: DATUM, oznaka: String(u(datum, sat, minut).trenutak) },
     ]);
+    return { stanje: poslije, oznaka: String(u(datum, sat, minut).trenutak) };
+  };
+  // Prvi samostalni pokušaj: provjera u 23:40 bez svježeg rada.
+  const prviPokusaj = () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(20), DATUM, 23, 40);
+    const prelaz = primijeni(stanje, bezRada(oznaka), u(DATUM, 23, 42));
+    expect(prelaz.radnje).toEqual([POKRENI]);
+    return prelaz.stanje;
+  };
+
+  it("prije 23:00 izvještaj nikad ne ide sam, ni kad je pauza duga", () => {
+    let stanje = aktivanU(9);
+    for (let minut = 9 * 60; minut < 23 * 60 + 40; minut += 5) {
+      const prelaz = primijeni(stanje, cron, u(DATUM, Math.floor(minut / 60), minut % 60));
+      expect(vrste(prelaz.radnje)).not.toContain("pokreni_pisanje");
+      stanje = prelaz.stanje;
+    }
   });
 
-  it("poslije neuspjeha preko dana cron do 23:00 ne šalje ništa, pa ni pitanje", () => {
-    const pocetno = { ...dan("neuspjeh"), posljednjaAktivnost: u(DATUM, 12, 0).trenutak };
-    for (let sat = 16; sat < 23; sat++) {
-      expect(primijeni(pocetno, cron, u(DATUM, sat, 0)).radnje).toEqual([]);
+  it("između 22:30 i 23:40 nema ni provjere", () => {
+    for (const [sat, minut] of [[22, 35], [23, 0], [23, 35]]) {
+      expect(primijeni(aktivanU(20), cron, u(DATUM, sat, minut)).radnje).toEqual([]);
     }
+  });
+
+  it("prva provjera je u 23:40", () => {
+    provjeraU(aktivanU(20), DATUM, 23, 40);
+  });
+
+  it("dan bez signala iz hooka ima prvu provjeru u 23:40", () => {
+    expect(primijeni(noviDan(DATUM), cron, u(DATUM, 23, 35)).radnje).toEqual([]);
+    provjeraU(noviDan(DATUM), DATUM, 23, 40);
+  });
+
+  it("aktivnost iz hooka u 23:30 pomjera prvu provjeru na 0:10", () => {
+    const stanje = aktivanU(23, 30);
+
+    expect(primijeni(stanje, cron, u(SUTRA, 0, 5)).radnje).toEqual([]);
+    provjeraU(stanje, SUTRA, 0, 10);
+  });
+
+  it("aktivnost poslije ponoći pomjera provjeru jučerašnjeg radnog dana", () => {
+    const stanje = aktivanU(0, 10, SUTRA);
+
+    expect(primijeni(stanje, cron, u(SUTRA, 0, 45)).radnje).toEqual([]);
+    provjeraU(stanje, SUTRA, 0, 50);
+  });
+
+  it("provjera bez svježeg rada pokreće pisanje", () => {
+    expect(prviPokusaj().faza).toBe("pisanje");
+  });
+
+  it("svjež rad mlađi od 40 minuta odlaže provjeru do 40 minuta poslije tog rada", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(20), DATUM, 23, 40);
+    const poslije = primijeni(stanje, sRadom(oznaka, u(DATUM, 23, 30).trenutak), u(DATUM, 23, 42));
+
+    expect(poslije.radnje).toEqual([]);
+    expect(primijeni(poslije.stanje, cron, u(SUTRA, 0, 5)).radnje).toEqual([]);
+    provjeraU(poslije.stanje, SUTRA, 0, 10);
+  });
+
+  it("svjež rad star 40 minuta pokreće pisanje", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(20), DATUM, 23, 40);
+
+    expect(primijeni(stanje, sRadom(oznaka, u(DATUM, 23, 2).trenutak), u(DATUM, 23, 42)).radnje).toEqual([POKRENI]);
+  });
+
+  it("svjež rad iz budućnosti ne odlaže duže od 40 minuta", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(20), DATUM, 23, 40);
+    const poslije = primijeni(stanje, sRadom(oznaka, u(SUTRA, 5, 0).trenutak), u(DATUM, 23, 42)).stanje;
+
+    expect(primijeni(poslije, cron, u(SUTRA, 0, 21)).radnje).toEqual([]);
+    provjeraU(poslije, SUTRA, 0, 22);
+  });
+
+  it("aktivnost iz hooka za vrijeme provjere pomjera T, a rezultat ne pokreće pisanje", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(20), DATUM, 23, 40);
+    const sAktivnoscu = primijeni(stanje, aktivnost, u(DATUM, 23, 41)).stanje;
+    const poslije = primijeni(sAktivnoscu, bezRada(oznaka), u(DATUM, 23, 42));
+
+    expect(poslije.radnje).toEqual([]);
+    expect(primijeni(poslije.stanje, cron, u(SUTRA, 0, 20)).radnje).toEqual([]);
+    provjeraU(poslije.stanje, SUTRA, 0, 21);
+  });
+
+  it("provjera koja se ne javi 15 minuta ponavlja se poslije 30 minuta", () => {
+    const { stanje } = provjeraU(aktivanU(20), DATUM, 23, 40);
+    const pala = primijeni(stanje, cron, u(DATUM, 23, 55));
+
+    expect(pala.radnje).toEqual([]);
+    expect(primijeni(pala.stanje, cron, u(SUTRA, 0, 20)).radnje).toEqual([]);
+    provjeraU(pala.stanje, SUTRA, 0, 25);
+  });
+
+  it("javljeni neuspjeh provjere ponavlja se poslije 30 minuta", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(20), DATUM, 23, 40);
+    const pala = primijeni(stanje, palo(oznaka), u(DATUM, 23, 42));
+
+    expect(pala.radnje).toEqual([]);
+    expect(primijeni(pala.stanje, cron, u(SUTRA, 0, 10)).radnje).toEqual([]);
+    provjeraU(pala.stanje, SUTRA, 0, 12);
+  });
+
+  it("provjera u 23:40 kreće i kad pitanje čeka odgovor", () => {
+    provjeraU({ ...aktivanU(16), pitanjeOd: u(DATUM, 17, 2).trenutak }, DATUM, 23, 40);
+  });
+
+  it("u 1:00 pisanje kreće bez provjere, i kad prvi pokušaj nije ni krenuo", () => {
+    const stanje = aktivanU(0, 50, SUTRA);
+
+    expect(primijeni(stanje, cron, u(SUTRA, 0, 55)).radnje).toEqual([]);
+    const { stanje: poslije, radnje } = primijeni(stanje, cron, u(SUTRA, 1, 0));
+    expect(radnje).toEqual([POKRENI]);
+    expect(poslije.faza).toBe("pisanje");
+  });
+
+  it("u 1:00 kreće i kad je provjera u toku, a njeno javljanje ne pokreće drugo pisanje", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(0, 10, SUTRA), SUTRA, 0, 50);
+    const pisanje = primijeni(stanje, cron, u(SUTRA, 1, 0));
+
+    expect(pisanje.radnje).toEqual([POKRENI]);
+    expect(primijeni(pisanje.stanje, bezRada(oznaka), u(SUTRA, 1, 2)).radnje).toEqual([]);
+  });
+
+  it("izostali cron u 1:00 nadoknadi sljedeći", () => {
+    expect(primijeni(aktivanU(0, 50, SUTRA), cron, u(SUTRA, 1, 5)).radnje).toEqual([POKRENI]);
+  });
+
+  it("dok pisanje teče, 1:00 ne pokreće novo", () => {
+    const stanje = { ...dan("pisanje"), uTokuOd: u(SUTRA, 0, 50).trenutak };
+
+    expect(primijeni(stanje, cron, u(SUTRA, 1, 0)).radnje).toEqual([]);
+  });
+
+  it("pisanje koje je u 1:00 bilo u toku troši pokušaj iz 1:00, pa poslije njegovog neuspjeha nema novog", () => {
+    const pisanje = primijeni(aktivanU(20), zavrsio, u(SUTRA, 0, 50)).stanje;
+    const uToku = primijeni(pisanje, cron, u(SUTRA, 1, 0)).stanje;
+    const pao = primijeni(uToku, neuspjeh, u(SUTRA, 1, 10)).stanje;
+
+    for (const minut of [15, 30, 55]) {
+      expect(primijeni(pao, cron, u(SUTRA, 1, minut)).radnje).toEqual([]);
+    }
+  });
+
+  it("javljanje provjere poslije 1:00 pokreće pokušaj iz 1:00, pa poslije njegovog neuspjeha nema trećeg", () => {
+    const { stanje, oznaka } = provjeraU(aktivanU(0, 10, SUTRA), SUTRA, 0, 55);
+    const pisanje = primijeni(stanje, bezRada(oznaka), u(SUTRA, 1, 1));
+    expect(pisanje.radnje).toEqual([POKRENI]);
+    const pao = primijeni(pisanje.stanje, neuspjeh, u(SUTRA, 1, 10)).stanje;
+
+    expect(primijeni(pao, cron, u(SUTRA, 1, 15)).radnje).toEqual([]);
+  });
+
+  it.each(["zatvoren", "bez_poruke"] as const)("u fazi %s ni 23:40 ni 1:00 ne pokreću ništa", (faza) => {
+    const stanje = { ...dan(faza, "Tekst"), uTokuOd: u(DATUM, 23, 39).trenutak };
+
+    expect(vrste(primijeni(stanje, cron, u(DATUM, 23, 40)).radnje)).not.toContain("pokreni_provjeru");
+    expect(vrste(primijeni(stanje, cron, u(SUTRA, 1, 0)).radnje)).not.toContain("pokreni_pisanje");
+  });
+
+  it("poslije neuspjeha prvog pokušaja nema provjera do 1:00, a u 1:00 je drugi", () => {
+    const pao = primijeni(prviPokusaj(), neuspjeh, u(DATUM, 23, 50)).stanje;
+    const saAktivnoscu = primijeni(pao, aktivnost, u(DATUM, 23, 55)).stanje;
+
+    for (let minut = 0; minut < 60; minut += 5) {
+      expect(primijeni(saAktivnoscu, cron, u(SUTRA, 0, minut)).radnje).toEqual([]);
+    }
+    expect(primijeni(saAktivnoscu, cron, u(SUTRA, 1, 0)).radnje).toEqual([POKRENI]);
+  });
+
+  it("poslije neuspjeha u 1:00 nema trećeg pokušaja: mentoru ništa, a Nemanji upozorenje", () => {
+    const pao = primijeni(prviPokusaj(), neuspjeh, u(DATUM, 23, 50)).stanje;
+    const drugi = primijeni(pao, cron, u(SUTRA, 1, 0)).stanje;
+    const { stanje, radnje } = primijeni(drugi, neuspjeh, u(SUTRA, 1, 10));
+
+    expect(radnje).toEqual([
+      {
+        vrsta: "posalji_nemanji",
+        tekst: "Pisanje izvještaja za 15.5.2030. nije uspjelo. Rad ulazi u sljedeći izvještaj.",
+      },
+    ]);
+    for (const minut of [15, 30, 55]) {
+      expect(primijeni(stanje, cron, u(SUTRA, 1, minut)).radnje).toEqual([]);
+    }
+  });
+
+  it('"završio" i poslije neuspjeha prvog pokušaja pokreće novi', () => {
+    const pao = primijeni(prviPokusaj(), neuspjeh, u(DATUM, 23, 50)).stanje;
+
+    expect(primijeni(pao, zavrsio, u(SUTRA, 0, 10)).radnje).toContainEqual(POKRENI);
+  });
+
+  it('pisanje pokrenuto sa "završio" ne troši samostalni pokušaj', () => {
+    const pisanje = primijeni(aktivanU(20), zavrsio, u(DATUM, 23, 10)).stanje;
+    const pao = primijeni(pisanje, neuspjeh, u(DATUM, 23, 15)).stanje;
+    const { stanje, oznaka } = provjeraU(pao, DATUM, 23, 40);
+
+    expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 23, 42)).radnje).toEqual([POKRENI]);
+  });
+
+  it("neuspjeh prije 23:00 ukida pitanja, ali ne i samostalno slanje", () => {
+    const pao = { ...aktivanU(14), faza: "neuspjeh" as const };
+
+    expect(primijeni(pao, cron, u(DATUM, 18, 0)).radnje).toEqual([]);
+    provjeraU(pao, DATUM, 23, 40);
+    expect(primijeni(pao, cron, u(SUTRA, 1, 0)).radnje).toEqual([POKRENI]);
+  });
+
+  it("od 2:00 jučerašnji dan više ne pokreće ništa", () => {
+    expect(primijeni(aktivanU(20), cron, u(SUTRA, 2, 0)).radnje).toEqual([]);
+  });
+
+  it("provjera iz 22:30 koja se javi poslije 23:00 ne pokreće pisanje", () => {
+    const stanje = primijeni(aktivanU(21, 30), cron, u(DATUM, 22, 30)).stanje;
+
+    expect(primijeni(stanje, bezRada(String(stanje.provjeraOd)), u(DATUM, 23, 0)).radnje).toEqual([]);
   });
 });
 
@@ -375,7 +618,8 @@ describe("pitanje o završetku", () => {
       const { stanje, oznaka } = uProvjeri();
       const { stanje: poslije } = primijeni(stanje, sRadom(oznaka, u(DATUM, 22, 0).trenutak), u(DATUM, 17, 2));
 
-      expect(poslije.odlozenoDo).toBe(u(DATUM, 18, 2).trenutak);
+      expect(primijeni(poslije, cron, u(DATUM, 18, 1)).radnje).toEqual([]);
+      expect(primijeni(poslije, cron, u(DATUM, 18, 2)).radnje).toHaveLength(1);
     });
 
     it("aktivnost dok provjera traje poništava pitanje, pa opet važi 60 minuta pauze", () => {
@@ -411,7 +655,9 @@ describe("pitanje o završetku", () => {
     it("provjera iz 22:30 može da pita do 22:45, a ne pred slanje u 23:00", () => {
       const { stanje, oznaka } = uProvjeri(22, 30);
 
-      expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 22, 44)).radnje).toHaveLength(1);
+      expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 22, 44)).radnje.map((radnja) => radnja.vrsta)).toEqual([
+        "posalji_pitanje",
+      ]);
       expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 22, 45)).radnje).toEqual([]);
       expect(primijeni(stanje, bezRada(oznaka), u(DATUM, 23, 0)).radnje).toEqual([]);
       expect(primijeni(stanje, bezRada(oznaka), u("2030-05-16", 0, 5)).radnje).toEqual([]);
@@ -556,45 +802,65 @@ describe("pitanje o završetku", () => {
       expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
     });
 
-    it("minut poslije ponoći je već staro", () => {
+    it("od juče, kad je juče zatvoreno, poslije ponoći je isteklo", () => {
       const { radnje } = primijeni(noviDan("2030-05-16"), dugme("jesam"), u("2030-05-16", 0, 1));
+
+      expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
+    });
+
+    it("od juče važi poslije ponoći dok radni dan nije zatvoren", () => {
+      const { stanje, radnje } = primijeni(pitanje(), dugme("jesam"), u("2030-05-16", 0, 30));
+
+      expect(stanje).toMatchObject({ datum: DATUM, faza: "pisanje" });
+      expect(radnje).toContainEqual({ vrsta: "pokreni_pisanje", datum: DATUM });
+    });
+
+    it("od juče od 1:00 je isteklo, iako radni dan nije zatvoren", () => {
+      const { radnje } = primijeni(pitanje(), dugme("jesam"), u("2030-05-16", 1, 0));
 
       expect(radnje).toEqual([{ vrsta: "odgovori_na_dugme", id: "d1", tekst: "Pitanje je isteklo." }]);
     });
   });
 
-  it("u 23:00 pisanje kreće i ako pitanje još čeka odgovor", () => {
-    const { stanje, radnje } = primijeni(pitanje(), cron, u(DATUM, 23, 0));
-
-    expect(stanje.faza).toBe("pisanje");
-    expect(radnje).toEqual([{ vrsta: "pokreni_pisanje", datum: DATUM }]);
-  });
 });
 
 describe("prelazak na ljetnje i zimsko vrijeme", () => {
   const PET_MINUTA = 5 * 60_000;
 
-  // Prolazi kroz cijeli dan po UTC-u, a pisanje se nikad ne javi.
-  function pokretanjaKrozDan(pocetak: string, kraj: string) {
-    let stanje = noviDan(lokalnoVrijeme(new Date(pocetak)).datum);
+  // Prolazi kroz radni dan po UTC-u, bez hooka, a ni provjera ni pisanje se nikad ne jave.
+  function samostalnoKrozDan(datum: string, pocetak: string, kraj: string) {
+    let stanje = noviDan(datum);
     const pokretanja: string[] = [];
     for (let t = Date.parse(pocetak); t <= Date.parse(kraj); t += PET_MINUTA) {
       const prelaz = primijeni(stanje, cron, lokalnoVrijeme(new Date(t)));
       stanje = prelaz.stanje;
-      if (prelaz.radnje.some((radnja) => radnja.vrsta === "pokreni_pisanje")) {
-        pokretanja.push(new Date(t).toISOString());
-      }
+      for (const radnja of prelaz.radnje) pokretanja.push(`${radnja.vrsta} ${new Date(t).toISOString()}`);
     }
     return pokretanja;
   }
 
+  // Provjera iz 23:40 se ne javi, pa se ponavlja u 0:25. Pisanje kreće u 1:00, a rok mu ističe u 1:30.
+  // Vremena su po UTC-u, izračunata ručno.
   it.each([
-    ["običan ljetnji dan", "2030-05-14T22:00:00Z", "2030-05-15T21:55:00Z", "2030-05-15T21:00:00.000Z"],
-    ["običan zimski dan", "2030-01-14T23:00:00Z", "2030-01-15T22:55:00Z", "2030-01-15T22:00:00.000Z"],
-    ["prelazak na ljetnje (23 sata)", "2030-03-30T23:00:00Z", "2030-03-31T21:55:00Z", "2030-03-31T21:00:00.000Z"],
-    ["prelazak na zimsko (25 sati)", "2030-10-26T22:00:00Z", "2030-10-27T22:55:00Z", "2030-10-27T22:00:00.000Z"],
-  ])("%s: pisanje kreće tačno jednom, u 23:00", (_ime, pocetak, kraj, ocekivano) => {
-    expect(pokretanjaKrozDan(pocetak, kraj)).toEqual([ocekivano]);
+    ["običan ljetnji dan", "2030-05-15", "2030-05-14T22:00:00Z", "2030-05-16T01:00:00Z",
+      ["2030-05-15T21:40", "2030-05-15T22:25", "2030-05-15T23:00", "2030-05-15T23:30"]],
+    ["običan zimski dan", "2030-01-15", "2030-01-14T23:00:00Z", "2030-01-16T02:00:00Z",
+      ["2030-01-15T22:40", "2030-01-15T23:25", "2030-01-16T00:00", "2030-01-16T00:30"]],
+    ["dan prije prelaska na ljetnje, 1:00 je još po zimskom", "2030-03-30", "2030-03-29T23:00:00Z", "2030-03-31T02:00:00Z",
+      ["2030-03-30T22:40", "2030-03-30T23:25", "2030-03-31T00:00", "2030-03-31T00:30"]],
+    ["dan prelaska na ljetnje (23 sata)", "2030-03-31", "2030-03-30T23:00:00Z", "2030-04-01T01:00:00Z",
+      ["2030-03-31T21:40", "2030-03-31T22:25", "2030-03-31T23:00", "2030-03-31T23:30"]],
+    ["dan prije prelaska na zimsko, 1:00 je još po ljetnjem", "2030-10-26", "2030-10-25T22:00:00Z", "2030-10-27T02:00:00Z",
+      ["2030-10-26T21:40", "2030-10-26T22:25", "2030-10-26T23:00", "2030-10-26T23:30"]],
+    ["dan prelaska na zimsko (25 sati)", "2030-10-27", "2030-10-26T22:00:00Z", "2030-10-28T02:00:00Z",
+      ["2030-10-27T22:40", "2030-10-27T23:25", "2030-10-28T00:00", "2030-10-28T00:30"]],
+  ])("%s: provjere u 23:40 i 0:25, a pisanje u 1:00", (_ime, datum, pocetak, kraj, [prva, druga, pisanje, rok]) => {
+    expect(samostalnoKrozDan(datum, pocetak, kraj)).toEqual([
+      `pokreni_provjeru ${prva}:00.000Z`,
+      `pokreni_provjeru ${druga}:00.000Z`,
+      `pokreni_pisanje ${pisanje}:00.000Z`,
+      `posalji_nemanji ${rok}:00.000Z`,
+    ]);
   });
 
   it("rok se računa po pravom vremenu kad se sat vrati unazad", () => {
@@ -660,7 +926,7 @@ describe("neuspjelo slanje", () => {
     const { stanje, radnje } = primijeni(napisano(), cron, u(DATUM, 12, 5));
 
     expect(stanje).toMatchObject({ faza: "bez_poruke", tekst: "Tekst" });
-    expect(radnje).toEqual([{ vrsta: "posalji_mentoru", tekst: "Tekst" }]);
+    expect(radnje).toEqual([{ vrsta: "posalji_mentoru", tekst: "Tekst", bezZvuka: false }]);
   });
 
   it("cron ne šalje poruku koja je baš poslata", () => {

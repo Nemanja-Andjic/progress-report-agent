@@ -2,9 +2,12 @@
 // Vidi worker/README.md.
 
 import {
+  datumRadnogDana,
+  KRAJ_DRUGOG_POKUSAJA_SAT,
   lokalnoVrijeme,
   noviDan,
   PITANJE_ISTEKLO,
+  pomjerenDatum,
   primijeni,
   type Dogadjaj,
   type Faza,
@@ -45,9 +48,10 @@ interface RedDana {
   faza: Faza;
   tekst: string | null;
   u_toku_od: number | null;
-  pokusaj_23: number;
+  samostalni_pokusaji: number;
   upozoren: number;
   posljednja_aktivnost: number | null;
+  rad_iz_provjere: number | null;
   provjera_od: number | null;
   pitanje_od: number | null;
   nije_od: number | null;
@@ -62,9 +66,10 @@ function izReda(red: RedDana): UcitanDan {
       faza: red.faza,
       tekst: red.tekst,
       uTokuOd: red.u_toku_od,
-      pokusaj23: Boolean(red.pokusaj_23),
+      samostalniPokusaji: red.samostalni_pokusaji,
       upozoren: Boolean(red.upozoren),
       posljednjaAktivnost: red.posljednja_aktivnost,
+      radIzProvjere: red.rad_iz_provjere,
       provjeraOd: red.provjera_od,
       pitanjeOd: red.pitanje_od,
       nijeOd: red.nije_od,
@@ -92,9 +97,11 @@ async function ucitajDan(db: D1Database, datum: string): Promise<UcitanDan> {
   return red ? izReda(red) : { stanje: noviDan(datum), verzija: 0 };
 }
 
-async function ucitajPosljednjiDan(db: D1Database, danas: string): Promise<UcitanDan> {
-  const red = await db.prepare("SELECT * FROM dani ORDER BY datum DESC LIMIT 1").first<RedDana>();
-  return red ? izReda(red) : { stanje: noviDan(danas), verzija: 0 };
+// Od 0:00 do 1:00 to je jučerašnji dan dok nije zatvoren, a inače današnji (ADR 0008).
+async function ucitajRadniDan(db: D1Database, lokalno: LokalnoVrijeme): Promise<UcitanDan> {
+  const juce = await ucitajDan(db, pomjerenDatum(lokalno.datum, -1));
+  if (datumRadnogDana(lokalno, juce.stanje.faza) === juce.stanje.datum) return juce;
+  return ucitajDan(db, lokalno.datum);
 }
 
 // Upisuje samo ako red nije mijenjan od učitavanja. Zato od dva istovremena događaja prolazi
@@ -102,11 +109,12 @@ async function ucitajPosljednjiDan(db: D1Database, danas: string): Promise<Ucita
 async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promise<boolean> {
   const rezultat = await db
     .prepare(
-      `INSERT INTO dani (datum, faza, tekst, u_toku_od, pokusaj_23, upozoren, posljednja_aktivnost,
-         provjera_od, pitanje_od, nije_od, odlozeno_do, verzija)
-       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?4 + 1)
+      `INSERT INTO dani (datum, faza, tekst, u_toku_od, samostalni_pokusaji, upozoren, posljednja_aktivnost,
+         provjera_od, pitanje_od, nije_od, odlozeno_do, rad_iz_provjere, verzija)
+       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?4 + 1)
        ON CONFLICT (datum) DO UPDATE SET faza = excluded.faza, tekst = excluded.tekst,
-         u_toku_od = excluded.u_toku_od, pokusaj_23 = excluded.pokusaj_23, upozoren = excluded.upozoren,
+         u_toku_od = excluded.u_toku_od, samostalni_pokusaji = excluded.samostalni_pokusaji,
+         upozoren = excluded.upozoren, rad_iz_provjere = excluded.rad_iz_provjere,
          posljednja_aktivnost = excluded.posljednja_aktivnost, provjera_od = excluded.provjera_od,
          pitanje_od = excluded.pitanje_od, nije_od = excluded.nije_od, odlozeno_do = excluded.odlozeno_do,
          verzija = excluded.verzija
@@ -118,13 +126,14 @@ async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promi
       stanje.tekst,
       verzija,
       stanje.uTokuOd,
-      Number(stanje.pokusaj23),
+      stanje.samostalniPokusaji,
       Number(stanje.upozoren),
       stanje.posljednjaAktivnost,
       stanje.provjeraOd,
       stanje.pitanjeOd,
       stanje.nijeOd,
       stanje.odlozenoDo,
+      stanje.radIzProvjere,
     )
     .run();
   return rezultat.meta.changes === 1;
@@ -135,14 +144,15 @@ async function predji(
   ucitaj: () => Promise<UcitanDan>,
   dogadjaj: Dogadjaj,
   lokalno: LokalnoVrijeme,
-): Promise<Radnja[]> {
+): Promise<{ datum: string; radnje: Radnja[] }> {
   for (let pokusaj = 0; pokusaj < POKUSAJI_UPISA; pokusaj++) {
     const { stanje, verzija } = await ucitaj();
     const prelaz = primijeni(stanje, dogadjaj, lokalno);
-    if (prelaz.stanje === stanje) return prelaz.radnje;
+    const rezultat = { datum: prelaz.stanje.datum, radnje: prelaz.radnje };
+    if (prelaz.stanje === stanje) return rezultat;
     // Novi dan još nema red u bazi, pa se ne poredi sa verzijom prethodnog dana.
     const ocekivana = prelaz.stanje.datum === stanje.datum ? verzija : 0;
-    if (await upisi(db, prelaz.stanje, ocekivana)) return prelaz.radnje;
+    if (await upisi(db, prelaz.stanje, ocekivana)) return rezultat;
   }
   throw new Error("Stanje dana nije upisano.");
 }
@@ -193,8 +203,11 @@ async function odgovoriNaDugme(env: Env, id: string, tekst?: string): Promise<vo
 }
 
 // Jedino mjesto koje čita mentorov chat. Sve osim izričitog "iskljucen" znači probni režim.
-function posaljiMentoru(env: Env, tekst: string): Promise<boolean> {
-  if (env.PROBNI_REZIM === "iskljucen") return posaljiPoruku(env, env.TELEGRAM_CHAT_MENTOR, tekst);
+// U probnom režimu poruka ide Nemanji, a poruke Nemanji uvijek stižu sa zvukom.
+function posaljiMentoru(env: Env, tekst: string, bezZvuka: boolean): Promise<boolean> {
+  if (env.PROBNI_REZIM === "iskljucen") {
+    return posaljiPoruku(env, env.TELEGRAM_CHAT_MENTOR, tekst, bezZvuka ? { disable_notification: true } : undefined);
+  }
   return posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, `(proba)\n\n${tekst}`);
 }
 
@@ -224,7 +237,7 @@ async function pokreniWorkflow(env: Env, workflow: string, ulazi: Record<string,
 // Vraća false samo ako poruka za mentora nije otišla. Tada dan ostaje bez poruke, a tekst u bazi.
 async function izvrsi(env: Env, datum: string, radnje: Radnja[], lokalno: LokalnoVrijeme): Promise<boolean> {
   const nastavi = async (dogadjaj: Dogadjaj) =>
-    izvrsi(env, datum, await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno), lokalno);
+    izvrsi(env, datum, (await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno)).radnje, lokalno);
 
   for (const radnja of radnje) {
     switch (radnja.vrsta) {
@@ -250,7 +263,7 @@ async function izvrsi(env: Env, datum: string, radnje: Radnja[], lokalno: Lokaln
         await posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, radnja.tekst);
         break;
       case "posalji_mentoru":
-        if (!(await posaljiMentoru(env, radnja.tekst))) {
+        if (!(await posaljiMentoru(env, radnja.tekst, radnja.bezZvuka))) {
           await nastavi({ vrsta: "slanje_nije_uspjelo" });
           return false;
         }
@@ -286,8 +299,8 @@ async function pritisnutoDugme(dugme: any, env: Env): Promise<Response> {
     datum: podaci[1],
     odgovor: podaci[2] === "jesam" ? "jesam" : "nije",
   };
-  const radnje = await predji(env.DB, () => ucitajDan(env.DB, lokalno.datum), dogadjaj, lokalno);
-  await izvrsi(env, lokalno.datum, radnje, lokalno);
+  const { datum, radnje } = await predji(env.DB, () => ucitajRadniDan(env.DB, lokalno), dogadjaj, lokalno);
+  await izvrsi(env, datum, radnje, lokalno);
   return new Response();
 }
 
@@ -303,13 +316,8 @@ async function telegram(zahtjev: Request, env: Env): Promise<Response> {
   if (!jeZavrsio(poruka?.text)) return new Response();
 
   const lokalno = lokalnoVrijeme(new Date());
-  const radnje = await predji(
-    env.DB,
-    () => ucitajPosljednjiDan(env.DB, lokalno.datum),
-    { vrsta: "zavrsio" },
-    lokalno,
-  );
-  await izvrsi(env, lokalno.datum, radnje, lokalno);
+  const { datum, radnje } = await predji(env.DB, () => ucitajRadniDan(env.DB, lokalno), { vrsta: "zavrsio" }, lokalno);
+  await izvrsi(env, datum, radnje, lokalno);
   return new Response();
 }
 
@@ -335,7 +343,7 @@ async function rezultat(zahtjev: Request, env: Env): Promise<Response> {
 
   const datum: string = telo.datum;
   const lokalno = lokalnoVrijeme(new Date());
-  const radnje = await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno);
+  const { radnje } = await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno);
   const poslato = await izvrsi(env, datum, radnje, lokalno);
   return new Response(null, { status: poslato ? 200 : 502 });
 }
@@ -358,7 +366,7 @@ async function provjera(zahtjev: Request, env: Env): Promise<Response> {
 
   const datum: string = telo.datum;
   const lokalno = lokalnoVrijeme(new Date());
-  const radnje = await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno);
+  const { radnje } = await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno);
   await izvrsi(env, datum, radnje, lokalno);
   return new Response();
 }
@@ -379,11 +387,12 @@ async function aktivnost(zahtjev: Request, env: Env): Promise<Response> {
   if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_HOOKA))) return new Response(null, { status: 401 });
 
   const lokalno = lokalnoVrijeme(new Date());
-  await predji(env.DB, () => ucitajDan(env.DB, lokalno.datum), { vrsta: "aktivnost" }, lokalno);
+  await predji(env.DB, () => ucitajRadniDan(env.DB, lokalno), { vrsta: "aktivnost" }, lokalno);
   return new Response(null, { status: 204 });
 }
 
 // Pored današnjeg gleda i ranije dane koji još čekaju, npr. pisanje pokrenuto prije ponoći.
+// Do 2:00 gleda i jučerašnji dan, zbog samostalnog slanja do 1:00 i pokušaja u 1:00 (ADR 0008).
 async function cron(env: Env): Promise<void> {
   const lokalno = lokalnoVrijeme(new Date());
   const { results } = await env.DB.prepare(
@@ -392,8 +401,10 @@ async function cron(env: Env): Promise<void> {
     .bind(lokalno.datum)
     .all<{ datum: string }>();
 
-  for (const datum of [...results.map((red) => red.datum), lokalno.datum]) {
-    const radnje = await predji(env.DB, () => ucitajDan(env.DB, datum), { vrsta: "cron" }, lokalno);
+  const juce = lokalno.sat < KRAJ_DRUGOG_POKUSAJA_SAT ? [pomjerenDatum(lokalno.datum, -1)] : [];
+  const datumi = new Set([...results.map((red) => red.datum), ...juce].sort());
+  for (const datum of [...datumi, lokalno.datum]) {
+    const { radnje } = await predji(env.DB, () => ucitajDan(env.DB, datum), { vrsta: "cron" }, lokalno);
     await izvrsi(env, datum, radnje, lokalno);
   }
 }
