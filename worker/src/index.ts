@@ -339,10 +339,15 @@ function ispravanDatum(datum: unknown): datum is string {
   return !Number.isNaN(vrijeme.getTime()) && vrijeme.toISOString().startsWith(datum);
 }
 
+// Telegram ne prima praznu poruku, a duža od NAJDUZA_PORUKA ne bi stala uz oznaku probe.
+function ispravanTekst(tekst: unknown): tekst is string {
+  return typeof tekst === "string" && Boolean(tekst.trim()) && tekst.length <= NAJDUZA_PORUKA;
+}
+
 function dogadjajRezultata(telo: any): Dogadjaj | null {
   if (telo?.ishod === "neuspjeh") return { vrsta: "rezultat", ishod: "neuspjeh" };
   if (telo?.ishod !== "gotovo") return null;
-  if (typeof telo.tekst !== "string" || !telo.tekst.trim() || telo.tekst.length > NAJDUZA_PORUKA) return null;
+  if (!ispravanTekst(telo.tekst)) return null;
   return { vrsta: "rezultat", ishod: "gotovo", tekst: telo.tekst };
 }
 
@@ -381,6 +386,20 @@ async function provjera(zahtjev: Request, env: Env): Promise<Response> {
   const { radnje } = await predji(env.DB, () => ucitajDan(env.DB, datum), dogadjaj, lokalno);
   await izvrsi(env, datum, radnje, lokalno);
   return new Response();
+}
+
+// Opšta ruta za poruke vlasniku (ADR 0004): tekst ide samo na Nemanjin chat, bez oznake probe,
+// i ništa se ne pamti. Ne ponavlja slanje, pa o novom pokušaju odlučuje workflow.
+async function vlasnik(zahtjev: Request, env: Env): Promise<Response> {
+  if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_ACTIONS))) return new Response(null, { status: 401 });
+
+  const telo = await zahtjev.json<any>().catch(() => null);
+  const tekst = telo?.tekst;
+  if (!ispravanTekst(tekst)) return new Response(null, { status: 400 });
+
+  // Bez podešenog chata poruka ne ide nigdje, pa ni na neki drugi chat.
+  const poslato = Boolean(env.TELEGRAM_CHAT_NEMANJA) && (await posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, tekst));
+  return new Response(null, { status: poslato ? 200 : 502 });
 }
 
 // Samo čita, a odgovor nosi samo datum i fazu, jer tekst u bazi može biti sadržaj izvještaja.
@@ -427,6 +446,7 @@ export default {
     if (zahtjev.method === "POST" && pathname === "/telegram") return telegram(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/rezultat") return rezultat(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/provjera") return provjera(zahtjev, env);
+    if (zahtjev.method === "POST" && pathname === "/actions/vlasnik") return vlasnik(zahtjev, env);
     if (zahtjev.method === "GET" && pathname === "/actions/stanje") return stanjeDana(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/aktivnost") return aktivnost(zahtjev, env);
     return new Response(null, { status: 404 });
