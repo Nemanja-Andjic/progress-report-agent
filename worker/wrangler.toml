@@ -7,7 +7,7 @@ compatibility_date = "2026-11-01"
 [vars]
 PROBNI_REZIM = "iskljucen"
 
-# Po UTC-u. Lokalno vrijeme Worker računa sam, pa 23:00 ne zavisi od ljetnjeg i zimskog vremena.
+# Po UTC-u. Lokalno vrijeme Worker računa sam, pa 23:40 i 1:00 ne zavise od ljetnjeg i zimskog vremena.
 [triggers]
 crons = ["*/5 * * * *"]
 
