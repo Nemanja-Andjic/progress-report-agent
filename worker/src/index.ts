@@ -56,6 +56,7 @@ interface RedDana {
   pitanje_od: number | null;
   nije_od: number | null;
   odlozeno_do: number | null;
+  odlozeno_slanje: number;
   verzija: number;
 }
 
@@ -74,6 +75,7 @@ function izReda(red: RedDana): UcitanDan {
       pitanjeOd: red.pitanje_od,
       nijeOd: red.nije_od,
       odlozenoDo: red.odlozeno_do,
+      odlozenoSlanje: Boolean(red.odlozeno_slanje),
     },
     verzija: red.verzija,
   };
@@ -110,14 +112,14 @@ async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promi
   const rezultat = await db
     .prepare(
       `INSERT INTO dani (datum, faza, tekst, u_toku_od, samostalni_pokusaji, upozoren, posljednja_aktivnost,
-         provjera_od, pitanje_od, nije_od, odlozeno_do, rad_iz_provjere, verzija)
-       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?4 + 1)
+         provjera_od, pitanje_od, nije_od, odlozeno_do, rad_iz_provjere, odlozeno_slanje, verzija)
+       VALUES (?1, ?2, ?3, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?4 + 1)
        ON CONFLICT (datum) DO UPDATE SET faza = excluded.faza, tekst = excluded.tekst,
          u_toku_od = excluded.u_toku_od, samostalni_pokusaji = excluded.samostalni_pokusaji,
          upozoren = excluded.upozoren, rad_iz_provjere = excluded.rad_iz_provjere,
          posljednja_aktivnost = excluded.posljednja_aktivnost, provjera_od = excluded.provjera_od,
          pitanje_od = excluded.pitanje_od, nije_od = excluded.nije_od, odlozeno_do = excluded.odlozeno_do,
-         verzija = excluded.verzija
+         odlozeno_slanje = excluded.odlozeno_slanje, verzija = excluded.verzija
        WHERE dani.verzija = ?4`,
     )
     .bind(
@@ -134,6 +136,7 @@ async function upisi(db: D1Database, stanje: StanjeDana, verzija: number): Promi
       stanje.nijeOd,
       stanje.odlozenoDo,
       stanje.radIzProvjere,
+      Number(stanje.odlozenoSlanje),
     )
     .run();
   return rezultat.meta.changes === 1;
@@ -274,10 +277,18 @@ async function izvrsi(env: Env, datum: string, radnje: Radnja[], lokalno: Lokaln
   return true;
 }
 
-function jeZavrsio(tekst: unknown): boolean {
-  if (typeof tekst !== "string") return false;
+const KOMANDE: Record<string, Dogadjaj> = {
+  "završio": { vrsta: "zavrsio" },
+  zavrsio: { vrsta: "zavrsio" },
+  "odloži": { vrsta: "odlozi" },
+  odlozi: { vrsta: "odlozi" },
+};
+
+// Bez obzira na velika slova, razmake oko riječi i kvačicu.
+function komanda(tekst: unknown): Dogadjaj | null {
+  if (typeof tekst !== "string") return null;
   const poruka = tekst.trim().toLowerCase();
-  return poruka === "završio" || poruka === "zavrsio";
+  return Object.hasOwn(KOMANDE, poruka) ? KOMANDE[poruka] : null;
 }
 
 // Dugme sa tuđeg chata ne dobija ni odgovor.
@@ -313,10 +324,11 @@ async function telegram(zahtjev: Request, env: Env): Promise<Response> {
   if (izmjena?.callback_query) return pritisnutoDugme(izmjena.callback_query, env);
   const poruka = izmjena?.message;
   if (!env.TELEGRAM_CHAT_NEMANJA || String(poruka?.chat?.id) !== env.TELEGRAM_CHAT_NEMANJA) return new Response();
-  if (!jeZavrsio(poruka?.text)) return new Response();
+  const dogadjaj = komanda(poruka?.text);
+  if (!dogadjaj) return new Response();
 
   const lokalno = lokalnoVrijeme(new Date());
-  const { datum, radnje } = await predji(env.DB, () => ucitajRadniDan(env.DB, lokalno), { vrsta: "zavrsio" }, lokalno);
+  const { datum, radnje } = await predji(env.DB, () => ucitajRadniDan(env.DB, lokalno), dogadjaj, lokalno);
   await izvrsi(env, datum, radnje, lokalno);
   return new Response();
 }

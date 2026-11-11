@@ -12,6 +12,7 @@ Ovo mijenja „slanje u 23:00" iz ADR 0004 i ADR 0005.
 - Dan bez rada se utvrđuje po istom pravilu, najranije u 23:40.
 - Izvještaj i poruka „Danas nema zabilježenog rada" poslati poslije ponoći idu mentoru bez zvuka.
 - Rad poslije ponoći ulazi u izvještaj radnog dana koji je u toku, dok se on ne pošalje. Izvještaj nosi datum radnog dana. „završio" i aktivnost poslije ponoći pripadaju radnom danu koji je u toku. Poslije slanja, a najkasnije od 1:00, počinje novi radni dan.
+- Od 1:00 do 5:00 „završio", „odloži" i „Jesam" sa jučerašnjeg pitanja se uvijek odnose na sinoćni rad. Ne pokreću ništa i ne važe za novi radni dan, a bot odgovori: „Radni dan je zatvoren u 1:00. Rad od sada ulazi u sljedeći izvještaj." Od 5:00 sve radi kao inače.
 
 ## „odloži"
 

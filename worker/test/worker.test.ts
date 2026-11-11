@@ -108,6 +108,7 @@ const posljednjaAktivnost = (datum = DANAS) =>
     .first<{ vrijeme: number | null }>()
     .then((red) => red?.vrijeme ?? null);
 const zavrsio = (env?: Partial<Env>) => pozovi(telegramZahtjev("završio"), env);
+const RADNI_DAN_ZATVOREN = "Radni dan je zatvoren u 1:00. Rad od sada ulazi u sljedeći izvještaj.";
 const gotovo = (tekst: string, env?: Partial<Env>, datum = DANAS) =>
   pozovi(rezultatZahtjev({ datum, ishod: "gotovo", tekst }), env);
 const neuspjeh = (env?: Partial<Env>, datum = DANAS) => pozovi(rezultatZahtjev({ datum, ishod: "neuspjeh" }), env);
@@ -587,6 +588,36 @@ describe("pitanje o završetku", () => {
     });
   });
 
+  describe('poslije "odloži"', () => {
+    const odlozi = () => pozovi(telegramZahtjev("odloži"));
+
+    it('"Jesam" sa već poslatog pitanja i dalje pokreće pisanje', async () => {
+      await doPitanja();
+      sat("15:05");
+      await odlozi();
+
+      await pritisni("jesam");
+
+      expect(datumiPisanja()).toEqual([DANAS]);
+    });
+
+    it('"Nije" ne pravi novo pitanje', async () => {
+      await doPitanja();
+      sat("15:05");
+      await odlozi();
+
+      await pritisni("nije");
+      expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "U redu." }]);
+      for (let minut = 10; minut < 60; minut += 5) await cronUTC(`15:${minut}`);
+      for (let cas = 16; cas < 21; cas++) {
+        for (let minut = 0; minut < 60; minut += 5) await cronUTC(`${cas}:${String(minut).padStart(2, "0")}`);
+      }
+
+      expect(provjere()).toHaveLength(1);
+      expect(pitanja()).toHaveLength(1);
+    });
+  });
+
   describe("staro dugme", () => {
     it.each(["jesam", "nije"] as const)('"%s" sa jučerašnjeg pitanja samo dobija odgovor da je isteklo', async (odgovor) => {
       await pritisni(odgovor, "2030-05-14");
@@ -614,14 +645,37 @@ describe("pitanje o završetku", () => {
       expect(datumiPisanja()).toEqual([DANAS]);
     });
 
-    it("pitanje iz 22:40 od 1:00 više ne pokreće pisanje", async () => {
+    it('"Jesam" sa pitanja iz 22:40 od 1:00 do 5:00 kaže da je radni dan zatvoren', async () => {
       await pitanjeU2240();
       vi.setSystemTime(new Date("2030-05-15T23:01:00Z"));
+      await pritisni("jesam");
+      vi.setSystemTime(new Date("2030-05-16T02:59:00Z"));
+      await pritisni("jesam");
+
+      expect(odgovoriNaDugmad).toEqual([
+        { id: "dugme-1", tekst: RADNI_DAN_ZATVOREN },
+        { id: "dugme-1", tekst: RADNI_DAN_ZATVOREN },
+      ]);
+      expect(pisanja()).toEqual([]);
+    });
+
+    it('"Jesam" sa pitanja iz 22:40 od 5:00 je isteklo', async () => {
+      await pitanjeU2240();
+      vi.setSystemTime(new Date("2030-05-16T03:00:00Z"));
 
       await pritisni("jesam");
 
       expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "Pitanje je isteklo." }]);
       expect(pisanja()).toEqual([]);
+    });
+
+    it('"Nije" sa pitanja iz 22:40 od 1:00 je isteklo', async () => {
+      await pitanjeU2240();
+      vi.setSystemTime(new Date("2030-05-15T23:30:00Z"));
+
+      await pritisni("nije");
+
+      expect(odgovoriNaDugmad).toEqual([{ id: "dugme-1", tekst: "Pitanje je isteklo." }]);
     });
 
     it("pitanje iz 22:40 poslije zatvaranja radnog dana je isteklo, i prije 1:00", async () => {
@@ -886,7 +940,7 @@ describe("Telegram webhook", () => {
     expect(poruke).toEqual([]);
   });
 
-  it.each(["Završio", "  završio\n", "zavrsio"])("prihvata %j", async (tekst) => {
+  it.each(["Završio", "  završio\n", "zavrsio", " ZAVRSIO "])("prihvata %j", async (tekst) => {
     await pozovi(telegramZahtjev(tekst));
 
     expect(pokretanja).toHaveLength(1);
@@ -1105,20 +1159,21 @@ describe("radni dan po lokalnom vremenu", () => {
   it("zimi je 1:00 sat kasnije po UTC-u", async () => {
     vi.setSystemTime(new Date("2030-01-15T23:30:00Z"));
     await zavrsio();
+    vi.setSystemTime(new Date("2030-01-15T23:59:00Z"));
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe("Pisanje izvještaja je već u toku.");
     vi.setSystemTime(new Date("2030-01-16T00:00:00Z"));
     await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe(RADNI_DAN_ZATVOREN);
 
-    expect(pokretanja.map((pokretanje) => pokretanje.telo)).toEqual([
-      { ref: "main", inputs: { datum: "2030-01-15" } },
-      { ref: "main", inputs: { datum: "2030-01-16" } },
-    ]);
+    expect(datumiPisanja()).toEqual(["2030-01-15"]);
   });
 
   it("rezultat stigao poslije 1:00 zatvara svoj dan i ne dira novi", async () => {
     vi.setSystemTime(new Date("2030-05-15T22:50:00Z"));
     await zavrsio();
 
-    vi.setSystemTime(new Date("2030-05-15T23:10:00Z"));
+    vi.setSystemTime(new Date("2030-05-16T03:10:00Z"));
     await zavrsio();
     await gotovo("Juče", ENV, "2030-05-15");
     await zavrsio();
@@ -1658,5 +1713,163 @@ describe("stanje dana", () => {
 
     expect(await stanje(DANAS)).toEqual({ datum: DANAS, faza: "zatvoren" });
     expect(await stanje("2030-05-16")).toEqual({ datum: "2030-05-16", faza: "otvoren" });
+  });
+});
+
+describe('"odloži"', () => {
+  const POTVRDA = "U redu, čekam tvoje ‚završio', najkasnije do 1:00.";
+  const odlozi = (tekst = "odloži", chat = CHAT_NEMANJA) => pozovi(telegramZahtjev(tekst, chat));
+  // Cron svakih 5 minuta, od datog trenutka po UTC-u do 0:55 po lokalnom.
+  async function cronoviDo1(od: string) {
+    for (let trenutak = Date.parse(od); trenutak < Date.parse("2030-05-15T23:00:00Z"); trenutak += 5 * 60_000) {
+      await cronU(new Date(trenutak).toISOString());
+    }
+  }
+
+  it.each(["odloži", "odlozi", "Odloži", "  ODLOZI\n", " OdLoŽi "])("prima %j i potvrđuje", async (tekst) => {
+    expect((await odlozi(tekst)).status).toBe(200);
+
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: POTVRDA }]);
+    expect(pokretanja).toEqual([]);
+  });
+
+  it.each(["odloži malo", "odlo"])("ne prima %j", async (tekst) => {
+    await odlozi(tekst);
+
+    expect(poruke).toEqual([]);
+  });
+
+  it.each([CHAT_TUDJI, CHAT_MENTOR])("sa tuđeg chata (%i) se tiho preskače", async (chat) => {
+    expect((await odlozi("odloži", chat)).status).toBe(200);
+
+    expect(poruke).toEqual([]);
+    await cronU("2030-05-15T21:40:00Z");
+    expect(provjere()).toHaveLength(1);
+  });
+
+  it("poslije njega nema pitanja ni provjera, a izvještaj ide u 1:00", async () => {
+    vi.setSystemTime(new Date("2030-05-15T14:00:00Z"));
+    await aktivnost();
+    await odlozi();
+
+    await cronoviDo1("2030-05-15T14:05:00Z");
+    expect(pokretanja).toEqual([]);
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: POTVRDA }]);
+
+    await cronU("2030-05-15T23:00:00Z");
+    expect(datumiPisanja()).toEqual([DANAS]);
+    expect(provjere()).toEqual([]);
+  });
+
+  it('izvještaj ide na "završio"', async () => {
+    await odlozi();
+    vi.setSystemTime(new Date("2030-05-15T22:30:00Z"));
+
+    await zavrsio();
+
+    expect(datumiPisanja()).toEqual([DANAS]);
+    await gotovo("Tekst");
+    expect(poruke.at(-1)?.tekst).toBe("(proba)\n\nTekst");
+  });
+
+  it("od 0:00 do 1:00 važi za jučerašnji radni dan", async () => {
+    vi.setSystemTime(new Date("2030-05-15T21:30:00Z"));
+    await aktivnost();
+    vi.setSystemTime(new Date("2030-05-15T22:05:00Z"));
+    await odlozi();
+
+    await cronoviDo1("2030-05-15T22:10:00Z");
+    expect(pokretanja).toEqual([]);
+    await cronU("2030-05-15T23:00:00Z");
+    expect(datumiPisanja()).toEqual([DANAS]);
+  });
+
+  it("ponovno samo ponovi potvrdu", async () => {
+    await odlozi();
+    await odlozi("odlozi");
+
+    expect(poruke).toEqual([
+      { chat: CHAT_NEMANJA, tekst: POTVRDA },
+      { chat: CHAT_NEMANJA, tekst: POTVRDA },
+    ]);
+  });
+
+  it("dok pisanje teče, odgovara da je pisanje u toku", async () => {
+    await zavrsio();
+
+    await odlozi();
+
+    expect(poruke.at(-1)?.tekst).toBe("Pisanje izvještaja je već u toku.");
+    expect(pisanja()).toHaveLength(1);
+  });
+
+  it('dok poruka mentoru čeka, odgovara isto kao na "završio"', async () => {
+    await zavrsio();
+    telegramPada = true;
+    await gotovo("Tekst");
+    telegramPada = false;
+
+    await odlozi();
+
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj je napisan, ali poruka još nije poslata.");
+  });
+
+  it("na zatvoren dan odgovara da je izvještaj već poslat", async () => {
+    await zavrsio();
+    await gotovo("Tekst");
+
+    await odlozi();
+
+    expect(poruke.at(-1)?.tekst).toBe("Izvještaj za danas je već poslat.");
+  });
+
+  it("poslije neuspjeha važi kao i inače", async () => {
+    await zavrsio();
+    await neuspjeh();
+
+    await odlozi();
+    expect(poruke.at(-1)?.tekst).toBe(POTVRDA);
+
+    await cronoviDo1("2030-05-15T21:40:00Z");
+    expect(pisanja()).toHaveLength(1);
+    await cronU("2030-05-15T23:00:00Z");
+    expect(pisanja()).toHaveLength(2);
+  });
+});
+
+describe("od 1:00 do 5:00", () => {
+  it.each(["završio", "zavrsio", " ZAVRŠIO ", "odloži", "odlozi", "  OdLoZi\n"])(
+    "%j ne pokreće ništa i ne važi za novi radni dan",
+    async (tekst) => {
+      vi.setSystemTime(new Date("2030-05-15T21:00:00Z"));
+      await aktivnost();
+      vi.setSystemTime(new Date("2030-05-15T23:10:00Z"));
+
+      expect((await pozovi(telegramZahtjev(tekst))).status).toBe(200);
+
+      expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: RADNI_DAN_ZATVOREN }]);
+      expect(pokretanja).toEqual([]);
+      // Novi radni dan ne čeka "završio": u 23:40 ide samostalna provjera kao i inače.
+      await cronU("2030-05-16T21:40:00Z");
+      expect(provjere()).toHaveLength(1);
+    },
+  );
+
+  it("u 4:59 je isto, a od 5:00 sve radi kao inače", async () => {
+    vi.setSystemTime(new Date("2030-05-16T02:59:00Z"));
+    await zavrsio();
+    expect(poruke.at(-1)?.tekst).toBe(RADNI_DAN_ZATVOREN);
+
+    vi.setSystemTime(new Date("2030-05-16T03:00:00Z"));
+    await zavrsio();
+    expect(datumiPisanja()).toEqual(["2030-05-16"]);
+  });
+
+  it("sa tuđeg chata se tiho preskače", async () => {
+    vi.setSystemTime(new Date("2030-05-15T23:10:00Z"));
+
+    await pozovi(telegramZahtjev("završio", CHAT_TUDJI));
+
+    expect(poruke).toEqual([]);
   });
 });
