@@ -15,11 +15,25 @@ import {
   type Radnja,
   type StanjeDana,
 } from "./pravila";
+import {
+  greskaZaNemanju,
+  istekao,
+  NEUSPJEH,
+  porukaZaChat,
+  RAZMISLJAM,
+  SAMO_TEKST,
+  spojenoPitanje,
+  vrstaPoruke,
+  type Chat,
+  type IshodOdgovora,
+  type Persiranje,
+} from "./pitanja";
 
 const REPO_IZVJESTAJA = "Nemanja-Andjic/progress-report-izvjestaji";
 const WORKFLOW_PISANJA = "pisanje-i-objava.yml";
 const WORKFLOW_PROVJERE = "provjera-svjezeg-rada.yml";
 const WORKFLOW_JUTARNJE_PROVJERE = "jutarnja-provjera.yml";
+const WORKFLOW_PITANJA = "pitanje-o-radu.yml";
 // 6:30 UTC, u minutima od ponoći po UTC-u.
 const JUTARNJA_PROVJERA_MINUT_UTC = 6 * 60 + 30;
 const PODACI_DUGMETA = /^pitanje:(\d{4}-\d{2}-\d{2}):(jesam|nije)$/;
@@ -280,18 +294,69 @@ async function izvrsi(env: Env, datum: string, radnje: Radnja[], lokalno: Lokaln
   return true;
 }
 
-const KOMANDE: Record<string, Dogadjaj> = {
-  "završio": { vrsta: "zavrsio" },
-  zavrsio: { vrsta: "zavrsio" },
-  "odloži": { vrsta: "odlozi" },
-  odlozi: { vrsta: "odlozi" },
-};
+// Odgovor ide samo na chat sa kog je pitanje stiglo.
+function idChata(env: Env, chat: Chat): string | undefined {
+  return chat === "nemanja" ? env.TELEGRAM_CHAT_NEMANJA : env.TELEGRAM_CHAT_MENTOR;
+}
 
-// Bez obzira na velika slova, razmake oko riječi i kvačicu.
-function komanda(tekst: unknown): Dogadjaj | null {
-  if (typeof tekst !== "string") return null;
-  const poruka = tekst.trim().toLowerCase();
-  return Object.hasOwn(KOMANDE, poruka) ? KOMANDE[poruka] : null;
+// Briše poruke jednog pokretanja i vraća njihov chat. Brisanje vraća redove samo jednom, pa od
+// odgovora, roka i neuspjelog pokretanja koji stignu u isto vrijeme dalje ide samo jedan.
+async function obrisiPokretanje(db: D1Database, oznaka: string): Promise<Chat | null> {
+  const { results } = await db
+    .prepare("DELETE FROM pitanja_o_radu WHERE oznaka = ?1 RETURNING chat")
+    .bind(oznaka)
+    .all<{ chat: Chat }>();
+  return results[0]?.chat ?? null;
+}
+
+async function javiNeuspjeh(env: Env, chat: Chat, razlog: "rok" | "nije_pokrenuto"): Promise<void> {
+  await posaljiPoruku(env, idChata(env, chat), NEUSPJEH);
+  await posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, greskaZaNemanju(chat, razlog));
+}
+
+// Pokretanje kome je prošao rok je neuspjeh, i kad GitHub workflow nije ni pokrenuo.
+async function zavrsiIsteklo(env: Env, chat: Chat): Promise<void> {
+  const pokretanje = await env.DB.prepare(
+    "SELECT oznaka, pokrenuto FROM pitanja_o_radu WHERE chat = ?1 AND oznaka IS NOT NULL LIMIT 1",
+  )
+    .bind(chat)
+    .first<{ oznaka: string; pokrenuto: number }>();
+  if (!pokretanje || !istekao(pokretanje.pokrenuto, Date.now())) return;
+  if (await obrisiPokretanje(env.DB, pokretanje.oznaka)) await javiNeuspjeh(env, chat, "rok");
+}
+
+// Ako za chat ništa nije u toku, sve poruke koje čekaju dobiju istu oznaku i idu kao jedno pitanje.
+// Uslov je u istom upisu, pa od dva istovremena poziva pokreće samo jedan. Poruka koja stigne
+// poslije upisa čeka sljedeće pokretanje.
+async function pokreniSljedece(env: Env, chat: Chat): Promise<void> {
+  for (;;) {
+    const oznaka = crypto.randomUUID();
+    const preuzeto = await env.DB.prepare(
+      `UPDATE pitanja_o_radu SET oznaka = ?2, pokrenuto = ?3
+       WHERE chat = ?1 AND oznaka IS NULL
+         AND NOT EXISTS (SELECT 1 FROM pitanja_o_radu WHERE chat = ?1 AND oznaka IS NOT NULL)`,
+    )
+      .bind(chat, oznaka, Date.now())
+      .run();
+    if (preuzeto.meta.changes === 0) return;
+
+    const { results } = await env.DB.prepare("SELECT tekst FROM pitanja_o_radu WHERE oznaka = ?1 ORDER BY id")
+      .bind(oznaka)
+      .all<{ tekst: string }>();
+    const pitanje = spojenoPitanje(results.map((red) => red.tekst));
+    if (await pokreniWorkflow(env, WORKFLOW_PITANJA, { chat, oznaka, pitanje })) return;
+    // Neuspjelo pokretanje ide kao istekao rok, pa red prelazi na sljedeće poruke.
+    if (await obrisiPokretanje(env.DB, oznaka)) await javiNeuspjeh(env, chat, "nije_pokrenuto");
+  }
+}
+
+// Pitanje o radu nikad ne dira stanje radnog dana i nije aktivnost (ADR 0007). Potvrdu dobija i
+// pitanje koje čeka u redu.
+async function primiPitanje(env: Env, chat: Chat, tekst: string): Promise<void> {
+  await zavrsiIsteklo(env, chat);
+  await env.DB.prepare("INSERT INTO pitanja_o_radu (chat, tekst) VALUES (?1, ?2)").bind(chat, tekst).run();
+  await posaljiPoruku(env, idChata(env, chat), RAZMISLJAM);
+  await pokreniSljedece(env, chat);
 }
 
 // Dugme sa tuđeg chata ne dobija ni odgovor.
@@ -327,9 +392,17 @@ async function telegram(zahtjev: Request, env: Env): Promise<Response> {
   if (izmjena?.callback_query) return pritisnutoDugme(izmjena.callback_query, env);
   const poruka = izmjena?.message;
   if (!env.TELEGRAM_CHAT_NEMANJA || String(poruka?.chat?.id) !== env.TELEGRAM_CHAT_NEMANJA) return new Response();
-  const dogadjaj = komanda(poruka?.text);
-  if (!dogadjaj) return new Response();
+  const vrsta = vrstaPoruke(poruka?.text);
+  if (vrsta.vrsta === "bez_teksta") {
+    await posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, SAMO_TEKST);
+    return new Response();
+  }
+  if (vrsta.vrsta === "pitanje") {
+    await primiPitanje(env, "nemanja", vrsta.tekst);
+    return new Response();
+  }
 
+  const dogadjaj: Dogadjaj = { vrsta: vrsta.komanda };
   const lokalno = lokalnoVrijeme(new Date());
   const { datum, radnje } = await predji(env.DB, () => ucitajRadniDan(env.DB, lokalno), dogadjaj, lokalno);
   await izvrsi(env, datum, radnje, lokalno);
@@ -405,6 +478,53 @@ async function vlasnik(zahtjev: Request, env: Env): Promise<Response> {
   return new Response(null, { status: poslato ? 200 : 502 });
 }
 
+const ISHODI_ODGOVORA: readonly unknown[] = ["odgovor", "odbijeno", "neuspjeh"] satisfies IshodOdgovora[];
+const PERSIRANJA: readonly unknown[] = ["da", "ne", "bez_promjene"] satisfies Persiranje[];
+
+interface JavljanjeOdgovora {
+  oznaka: string;
+  ishod: IshodOdgovora;
+  tekst: string;
+}
+
+// Tekst se gleda samo uz odgovor, jer ga odbijeno pitanje i neuspjeh nemaju. Persiranje se za sad
+// samo prima i provjerava, a upis i stalne poruke na "vi" su u #60.
+function javljanjeOdgovora(telo: any): JavljanjeOdgovora | null {
+  if (typeof telo?.oznaka !== "string" || !telo.oznaka) return null;
+  if (!ISHODI_ODGOVORA.includes(telo.ishod) || !PERSIRANJA.includes(telo.persiranje)) return null;
+  if (telo.ishod === "odgovor" && !ispravanTekst(telo.tekst)) return null;
+  return { oznaka: telo.oznaka, ishod: telo.ishod, tekst: telo.ishod === "odgovor" ? telo.tekst : "" };
+}
+
+// Javljanje sa nepoznatom ili starom oznakom, dvostruko i zakasnilo ništa ne rade i vraćaju 200.
+// Slanje se ne ponavlja: poruke pokretanja su već obrisane, pa ponovni zahtjev ne bi ništa uradio.
+async function odgovor(zahtjev: Request, env: Env): Promise<Response> {
+  if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_ACTIONS))) return new Response(null, { status: 401 });
+
+  const javljanje = javljanjeOdgovora(await zahtjev.json<any>().catch(() => null));
+  if (!javljanje) return new Response(null, { status: 400 });
+
+  const pokretanje = await env.DB.prepare("SELECT pokrenuto FROM pitanja_o_radu WHERE oznaka = ?1 LIMIT 1")
+    .bind(javljanje.oznaka)
+    .first<{ pokrenuto: number }>();
+  if (!pokretanje || istekao(pokretanje.pokrenuto, Date.now())) return new Response();
+  const chat = await obrisiPokretanje(env.DB, javljanje.oznaka);
+  if (!chat) return new Response();
+
+  await posaljiPoruku(env, idChata(env, chat), porukaZaChat(javljanje.ishod, javljanje.tekst));
+  await pokreniSljedece(env, chat);
+  return new Response();
+}
+
+// Rok se provjerava na svaki cron, pa i kad na chatu nema novih poruka.
+async function redoviPitanja(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare("SELECT DISTINCT chat FROM pitanja_o_radu").all<{ chat: Chat }>();
+  for (const { chat } of results) {
+    await zavrsiIsteklo(env, chat);
+    await pokreniSljedece(env, chat);
+  }
+}
+
 // Samo čita, a odgovor nosi samo datum i fazu, jer tekst u bazi može biti sadržaj izvještaja.
 async function stanjeDana(zahtjev: Request, env: Env): Promise<Response> {
   if (!(await kljucVazi(kljucIzZaglavlja(zahtjev), env.KLJUC_ACTIONS))) return new Response(null, { status: 401 });
@@ -469,6 +589,7 @@ export default {
     if (zahtjev.method === "POST" && pathname === "/actions/rezultat") return rezultat(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/provjera") return provjera(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/vlasnik") return vlasnik(zahtjev, env);
+    if (zahtjev.method === "POST" && pathname === "/actions/odgovor") return odgovor(zahtjev, env);
     if (zahtjev.method === "GET" && pathname === "/actions/stanje") return stanjeDana(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/aktivnost") return aktivnost(zahtjev, env);
     return new Response(null, { status: 404 });
@@ -477,5 +598,6 @@ export default {
     await cron(env);
     // Greška jutarnje provjere, npr. u bazi, ne smije da obori pravila dana, a pokušava sljedeći cron.
     await jutarnjaProvjera(env).catch(() => console.error("Jutarnja provjera nije pokrenuta: greška u Workeru."));
+    await redoviPitanja(env).catch(() => console.error("Red pitanja o radu nije obrađen: greška u Workeru."));
   },
 } satisfies ExportedHandler<Env>;
