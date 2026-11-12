@@ -71,6 +71,11 @@ PERIOD_ODGOVORA = timedelta(days=30)
 PERIOD_PAMCENJA = timedelta(hours=24)
 MAKS_PAMCENJA = 5
 PERSIRANJE = ("da", "ne", "bez_promjene")
+# Telegram ne prima poruku dužu od 4096 znakova, pa odgovor sa linkovima ima najviše ovoliko.
+MAKS_ODGOVORA = 3500
+# Kraj rečenice: znak, pa opciono navodnik ili zagrada, pa razmak ili kraj teksta. Tako tačka
+# unutar broja ili verzije (3.5, v1.2) nije kraj rečenice.
+KRAJ_RECENICE = re.compile(r"[.!?…][\"'”»)]*(?=\s|$)")
 ROK_GROKA_ZA_ODGOVOR = float(os.environ.get("XAI_ROK_ODGOVORA", 150))
 # Worker čeka odgovor 5 minuta od pokretanja, pa ponovni pokušaj ide samo ako stane u to.
 ROK_ODGOVORA = float(os.environ.get("AGENT_ROK_ODGOVORA", 300))
@@ -1026,10 +1031,32 @@ def odgovor_od_groka(ulaz: dict, datumi: list[str], kraj: float) -> dict:
     return {"tekst": tekst.strip(), "izvjestaji": sorted(set(izvjestaji)), "persiranje": persiranje}
 
 
+def skracen_tekst(tekst: str, granica: int) -> str:
+    """Tekst do granice, presječen na kraju posljednje cijele rečenice prije nje.
+
+    Bez ijednog kraja rečenice prije granice tekst se siječe na posljednjem razmaku, da se ne
+    pošalje pola riječi.
+    """
+    if len(tekst) <= granica:
+        return tekst
+    krajevi = [kraj.end() for kraj in KRAJ_RECENICE.finditer(tekst) if kraj.end() <= granica]
+    if krajevi:
+        return tekst[: krajevi[-1]]
+    return tekst[:granica].rsplit(maxsplit=1)[0]
+
+
 def tekst_sa_linkovima(tekst: str, datumi: list[str], adresa_sajta: str) -> str:
-    """Linkove na izvještaje slaže Python iz datuma, pa Grok ne može da ih izmisli."""
-    linkovi = [f"{adresa_sajta.rstrip('/')}/{FOLDER_IZVJESTAJA}/{datum}/" for datum in datumi]
-    return "\n\n".join([tekst, "\n".join(linkovi)]) if linkovi else tekst
+    """Linkove na izvještaje slaže Python iz datuma, pa Grok ne može da ih izmisli.
+
+    Cijela poruka, sa linkovima, staje u MAKS_ODGOVORA, pa se skraćuje samo Grokov tekst.
+    """
+    linkovi = "\n".join(
+        f"{adresa_sajta.rstrip('/')}/{FOLDER_IZVJESTAJA}/{datum}/" for datum in datumi
+    )
+    if not linkovi:
+        return skracen_tekst(tekst, MAKS_ODGOVORA)
+    razmak = "\n\n"
+    return skracen_tekst(tekst, MAKS_ODGOVORA - len(razmak) - len(linkovi)) + razmak + linkovi
 
 
 def json_za_fajl(sadrzaj) -> str:

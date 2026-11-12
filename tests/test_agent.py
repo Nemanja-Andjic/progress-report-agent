@@ -2042,6 +2042,44 @@ def test_pokvarena_podesavanja_bez_promjene_su_odgovor_na_ti_uz_upozorenje(repo,
     assert POGODAK not in repo.izlaz_odgovora
 
 
+def test_odgovor_duzi_od_3500_znakova_se_skracuje_na_kraju_cijele_recenice(repo, pitanja):
+    # Telegram ne prima poruku dužu od 4096 znakova. Rečenice su različite, da se vidi gdje je rez.
+    recenice = [f"Rečenica broj {broj} kaže nešto o radu, npr. v1.2 i 3.5 sati." for broj in range(100)]
+    pitanja.vrati(odgovor_o_radu(" ".join(recenice)))
+
+    izlaz = repo.odgovor()
+
+    # Prvih 60 rečenica ima 3469 znakova, a sa 61. bi ih bilo 3527.
+    assert izlaz["ishod"] == "odgovor"
+    assert izlaz["tekst"] == " ".join(recenice[:60])
+    assert len(izlaz["tekst"]) == 3469
+    assert repo.pitanja_o_radu()[0]["odgovor"] == izlaz["tekst"]
+
+
+def test_skracen_odgovor_sa_linkovima_staje_u_3500_znakova(repo, pitanja):
+    datumi = [datum_prije(dana) for dana in range(1, 11)]
+    for datum in datumi:
+        repo.izvjestaj(datum, AGENT)
+    recenice = [f"Rečenica broj {broj} o radu." for broj in range(300)]
+    pitanja.vrati(odgovor_o_radu(" ".join(recenice), izvjestaji=datumi))
+
+    tekst = repo.odgovor()["tekst"]
+
+    assert len(tekst) <= 3500
+    pocetak, linkovi = tekst.split("\n\n")
+    assert pocetak.endswith(".")
+    assert pocetak in " ".join(recenice)
+    assert len(linkovi.splitlines()) == 10
+
+
+def test_odgovor_do_3500_znakova_se_ne_skracuje(repo, pitanja):
+    tekst = "Radio je mnogo. " * 218 + "Kraj"
+    assert len(tekst) <= 3500
+    pitanja.vrati(odgovor_o_radu(tekst))
+
+    assert repo.odgovor()["tekst"] == tekst
+
+
 def test_dugacak_odgovor_bez_nalaza_iz_adr_0002_prolazi(repo, pitanja):
     # Provjera bilješke ima i ograničenje dužine, a za odgovor se gledaju samo nalazi iz ADR 0002.
     pitanja.vrati(odgovor_o_radu("Radio je mnogo. " * 200))

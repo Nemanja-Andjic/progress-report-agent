@@ -155,6 +155,8 @@ Isti model i ista podešavanja kao za pisanje, sa šemom `tekst`, `izvjestaji` (
 
 Odgovor sa datumom izvještaja kog nema u ulazu je `neuspjeh`. Linkove `ADRESA/izvjestaji/GGGG-MM-DD/` dodaje Python na kraj teksta, po jedan u redu, od najstarijeg.
 
+Cijeli odgovor, sa linkovima, ima najviše 3500 znakova (`MAKS_ODGOVORA`), jer Telegram ne prima poruku dužu od 4096. Duži Grokov tekst Python skrati na kraju posljednje cijele rečenice prije granice. Kraj rečenice je `.`, `!`, `?` ili `…`, uz navodnik ili zagradu, pa razmak ili kraj teksta, pa tačka u broju ili verziji (`3.5`, `v1.2`) nije kraj. Ako prije granice nema nijednog kraja rečenice, tekst se siječe na posljednjem razmaku. Provjera i čuvanje rade nad skraćenim tekstom.
+
 ### Provjera i čuvanje
 
 Gotov odgovor, sa linkovima, prolazi `napravi_sajt.py --provjeri-biljesku` kao tekst u privremenom fajlu van repoa. Obrazac tajne, putanja i zabranjen pojam daju `neuspjeh`. Ostali nalazi provjere bilješke (npr. dužina) se za odgovor ne gledaju. Agent prepoznaje nalaze po tekstu poruke provjere, pa promjena tih poruka u `napravi_sajt.py` mora da prati i `agent.py`.

@@ -17,7 +17,8 @@ Worker ne može sam da odgovara. Njegov GitHub token može samo da pokreće work
 
 - Odgovor ima do 6–8 rečenica i na jeziku je pitanja. O Nemanji piše u trećem licu. Mentoru se obraća na „ti", osim ako mentor zatraži persiranje, a to se pamti.
 - Grok vraća strogu šemu, isto kao za izvještaj (ADR 0006): `tekst`, `izvjestaji` (datumi izvještaja iz kojih odgovor dolazi) i `persiranje` (`da`, `ne` ili `bez_promjene`). Link na izvještaj na sajtu dodaje Python, pa Grok ne može da izmisli link.
-- Filter iz ADR 0002 i spisak zabranjenih pojmova provjeravaju i ulaz i gotov odgovor. Bilješka sa pogotkom ne ide Groku, a odgovor sa pogotkom se ne šalje.
+- Filter iz ADR 0002 i spisak zabranjenih pojmova provjeravaju bilješke, podatke sa GitHub-a i gotov odgovor. Bilješka sa pogotkom ne ide Groku, a odgovor sa pogotkom se ne šalje.
+- Pitanje se provjerava samo obrascima tajni i putanja. Pitanje sa takvim pogotkom se odbija prije Groka i ne čuva se, a chat dobija poruku da pitanje liči na lozinku, ključ ili putanju. Zabranjeni pojmovi u pitanju se puštaju, jer ih je napisao onaj ko pita. Odgovor se i tada provjerava cijelim filterom, pa zabranjen pojam iz pitanja ne može da stigne u odgovor.
 
 ## Red, pamćenje i rokovi
 
