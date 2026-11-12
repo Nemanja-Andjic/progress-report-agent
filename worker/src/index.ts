@@ -19,6 +19,9 @@ import {
 const REPO_IZVJESTAJA = "Nemanja-Andjic/progress-report-izvjestaji";
 const WORKFLOW_PISANJA = "pisanje-i-objava.yml";
 const WORKFLOW_PROVJERE = "provjera-svjezeg-rada.yml";
+const WORKFLOW_JUTARNJE_PROVJERE = "jutarnja-provjera.yml";
+// 6:30 UTC, u minutima od ponoći po UTC-u.
+const JUTARNJA_PROVJERA_MINUT_UTC = 6 * 60 + 30;
 const PODACI_DUGMETA = /^pitanje:(\d{4}-\d{2}-\d{2}):(jesam|nije)$/;
 const OBLIK_VREMENA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})$/;
 const ROK_POZIVA_MS = 10_000;
@@ -422,6 +425,25 @@ async function aktivnost(zahtjev: Request, env: Env): Promise<Response> {
   return new Response(null, { status: 204 });
 }
 
+// Jutarnju provjeru radi workflow, a Worker je samo pokreće, jednom dnevno od 6:30 UTC, za jučerašnji
+// radni dan (ADR 0010). Tada je po lokalnom vremenu poslije 7:30, pa je jučerašnji radni dan jučerašnji
+// datum. Datum se prvo upiše, pa od dva istovremena cron-a pokreće samo jedan. Ako pokretanje ne uspije,
+// upis se briše, pa pokušava sljedeći cron. Cron koji izostane tako nadoknadi sljedeći, do kraja dana
+// po UTC-u. Ako Worker padne između upisa i pokretanja, provjeru tog dana pokreće samo `schedule`.
+async function jutarnjaProvjera(env: Env): Promise<void> {
+  const sada = new Date();
+  if (sada.getUTCHours() * 60 + sada.getUTCMinutes() < JUTARNJA_PROVJERA_MINUT_UTC) return;
+
+  const datum = pomjerenDatum(sada.toISOString().slice(0, 10), -1);
+  const upis = await env.DB.prepare("INSERT OR IGNORE INTO jutarnje_provjere (datum, pokrenuta) VALUES (?1, ?2)")
+    .bind(datum, sada.getTime())
+    .run();
+  if (upis.meta.changes !== 1) return;
+  if (!(await pokreniWorkflow(env, WORKFLOW_JUTARNJE_PROVJERE, { datum }))) {
+    await env.DB.prepare("DELETE FROM jutarnje_provjere WHERE datum = ?1").bind(datum).run();
+  }
+}
+
 // Pored današnjeg gleda i ranije dane koji još čekaju, npr. pisanje pokrenuto prije ponoći.
 // Do 2:00 gleda i jučerašnji dan, zbog samostalnog slanja do 1:00 i pokušaja u 1:00 (ADR 0008).
 async function cron(env: Env): Promise<void> {
@@ -453,5 +475,7 @@ export default {
   },
   async scheduled(_kontroler, env) {
     await cron(env);
+    // Greška jutarnje provjere, npr. u bazi, ne smije da obori pravila dana, a pokušava sljedeći cron.
+    await jutarnjaProvjera(env).catch(() => console.error("Jutarnja provjera nije pokrenuta: greška u Workeru."));
   },
 } satisfies ExportedHandler<Env>;

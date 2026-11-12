@@ -32,6 +32,8 @@ type Env = typeof ENV;
 // Lažni Telegram i GitHub: pamte šta je stiglo, a obaraju se po potrebi.
 let poruke: { chat: number; tekst: string; bezZvuka?: true }[];
 let pokretanja: { url: string; token: string | null; telo: unknown }[];
+// Jutarnja provjera ide odvojeno, jer je cron pokreće svaki dan, pa i u testovima drugih pravila.
+let jutarnjaPokretanja: { url: string; token: string | null; telo: unknown }[];
 let telegramPada: boolean;
 let telegramNeOdgovara: boolean;
 let pozivaTelegrama: number;
@@ -67,11 +69,8 @@ async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promi
   }
   if (adresa.hostname === "api.github.com") {
     if (githubPada) return new Response("{}", { status: 500 });
-    pokretanja.push({
-      url: zahtjev.url,
-      token: zahtjev.headers.get("Authorization"),
-      telo: await zahtjev.json(),
-    });
+    const pokretanje = { url: zahtjev.url, token: zahtjev.headers.get("Authorization"), telo: await zahtjev.json() };
+    (pokretanje.url.includes("jutarnja-provjera.yml") ? jutarnjaPokretanja : pokretanja).push(pokretanje);
     return new Response(null, { status: 204 });
   }
   throw new Error(`Neočekivan poziv: ${adresa.hostname}`);
@@ -128,6 +127,8 @@ const pokretanjaWorkflowa = (ime: string) => pokretanja.filter((pokretanje) => p
 const provjere = () => pokretanjaWorkflowa("provjera-svjezeg-rada.yml");
 const pisanja = () => pokretanjaWorkflowa("pisanje-i-objava.yml");
 const datumiPisanja = () => pisanja().map((pokretanje) => (pokretanje.telo as { inputs: { datum: string } }).inputs.datum);
+const datumiJutarnjih = () =>
+  jutarnjaPokretanja.map((pokretanje) => (pokretanje.telo as { inputs: { datum: string } }).inputs.datum);
 const oznaka = () => (provjere().at(-1)?.telo as { inputs: { oznaka: string } }).inputs.oznaka;
 
 function provjeraZahtjev(telo: unknown, kljuc: string | null = KLJUC_ACTIONS): Request {
@@ -154,6 +155,7 @@ beforeEach(async () => {
   await applyD1Migrations(bazniEnv.DB, bazniEnv.MIGRACIJE);
   poruke = [];
   pokretanja = [];
+  jutarnjaPokretanja = [];
   telegramPada = false;
   telegramNeOdgovara = false;
   pozivaTelegrama = 0;
@@ -1997,3 +1999,95 @@ describe("poruka vlasniku", () => {
     expect(poruke).toEqual([]);
   });
 });
+
+describe("jutarnja provjera", () => {
+  it("u 6:30 UTC pokreće jutarnja-provjera.yml na grani main, za jučerašnji radni dan", async () => {
+    await cronU("2030-05-15T06:30:00Z");
+
+    expect(jutarnjaPokretanja).toEqual([
+      {
+        url: "https://api.github.com/repos/Nemanja-Andjic/progress-report-izvjestaji/actions/workflows/jutarnja-provjera.yml/dispatches",
+        token: `Bearer ${TOKEN_GITHUBA}`,
+        telo: { ref: "main", inputs: { datum: "2030-05-14" } },
+      },
+    ]);
+  });
+
+  it("pokreće je jednom za datum, a ostali cron-ovi tog dana je ne pokreću ponovo", async () => {
+    await cronU("2030-05-15T06:30:00Z");
+    await cronU("2030-05-15T06:35:00Z");
+    await cronU("2030-05-15T14:00:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14"]);
+  });
+
+  it("prije 6:30 UTC je ne pokreće", async () => {
+    await cronU("2030-05-15T00:00:00Z");
+    await cronU("2030-05-15T06:25:00Z");
+
+    expect(jutarnjaPokretanja).toEqual([]);
+  });
+
+  it("cron koji izostane u 6:30 nadoknadi sljedeći", async () => {
+    await cronU("2030-05-15T09:15:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14"]);
+  });
+
+  it("kad GitHub ne pokrene workflow, sljedeći cron pokuša ponovo", async () => {
+    githubPada = true;
+    await cronU("2030-05-15T06:30:00Z");
+    githubPada = false;
+    await cronU("2030-05-15T06:35:00Z");
+    await cronU("2030-05-15T06:40:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14"]);
+  });
+
+  it("kad GitHub ne odgovori, sljedeći cron pokuša ponovo", async () => {
+    vi.mocked(fetch).mockImplementationOnce(() => Promise.reject(new TypeError("Nema odgovora.")));
+    await cronU("2030-05-15T06:30:00Z");
+    await cronU("2030-05-15T06:35:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14"]);
+  });
+
+  it("svaki dan pokreće provjeru za svoj jučerašnji dan", async () => {
+    await cronU("2030-05-15T06:30:00Z");
+    await cronU("2030-05-16T06:30:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14", "2030-05-15"]);
+  });
+
+  it("i po zimskom računanju vremena uzima jučerašnji datum", async () => {
+    await cronU("2030-11-12T06:30:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-11-11"]);
+  });
+
+  it("na dan prelaska na zimsko vrijeme uzima jučerašnji datum", async () => {
+    await cronU("2030-10-27T06:30:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-10-26"]);
+  });
+
+  it("u 23:05 UTC po zimskom računanju, kad je po lokalnom već sljedeći dan, i dalje važi datum od jutra", async () => {
+    await cronU("2030-11-12T23:05:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-11-11"]);
+  });
+
+  it("u 23:55 UTC, kad je po lokalnom već sljedeći dan, i dalje važi datum od jutra", async () => {
+    await cronU("2030-05-15T23:55:00Z");
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14"]);
+  });
+
+  it("od dva istovremena cron-a pokreće je samo jedan", async () => {
+    vi.setSystemTime(new Date("2030-05-15T06:30:00Z"));
+    await Promise.all([cron(), cron()]);
+
+    expect(datumiJutarnjih()).toEqual(["2030-05-14"]);
+  });
+});
+
