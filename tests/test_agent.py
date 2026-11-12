@@ -48,6 +48,9 @@ PROJEKTI = [
 ]
 # Lažna provjera odbija svaki fajl sa ovim tekstom, kao što bi prava odbila zabranjen pojam.
 POGODAK = "IZMISLJENA-TAJNA-VRIJEDNOST"
+# Za bilješku lažna provjera prepoznaje i obrazac tajne i putanju, sa porukama prave provjere.
+TAJNA = "IZMISLJEN-OBRAZAC-KLJUCA"
+PUTANJA = "IZMISLJENA-PUTANJA-SA-RACUNARA"
 
 LAZNA_PROVJERA = f"""\
 import json, os, sys
@@ -58,7 +61,15 @@ with open(os.environ["DNEVNIK_PROVJERE"], "a", encoding="utf-8") as dnevnik:
 with open(fajl, encoding="utf-8") as ulaz:
     sadrzaj = ulaz.read()
 if zastavica == "--provjeri-biljesku":
-    greske = ["tekst ima zabranjen pojam"] if {POGODAK!r} in sadrzaj else []
+    greske = []
+    if {TAJNA!r} in sadrzaj:
+        greske.append("tekst ima obrazac tajne ili ključa")
+    if {PUTANJA!r} in sadrzaj:
+        greske.append("tekst ima putanju sa računara")
+    if {POGODAK!r} in sadrzaj:
+        greske.append("tekst ima zabranjen pojam")
+    if len(str(json.loads(sadrzaj).get("tekst"))) > 2000:
+        greske.append("tekst je duži od 2000 znakova")
 else:
     greske = []
     for i, stavka in enumerate(json.loads(sadrzaj)["stavke"]):
@@ -422,6 +433,53 @@ class Repo:
         izlaz = json.loads(rezultat.stdout)
         assert rezultat.returncode == (1 if izlaz["ishod"] == "neuspjeh" else 0)
         return izlaz
+
+    def odgovor(
+        self, pitanje="Šta je Nemanja radio juče?", chat="mentor", okruzenje: dict | None = None
+    ) -> dict:
+        rezultat = self.pokreni(
+            "odgovor",
+            "--chat", chat,
+            "--pitanje", pitanje,
+            "--repo", str(self.putanja),
+            "--adresa-sajta", ADRESA_SAJTA,
+            okruzenje=okruzenje,
+        )
+        izlaz = json.loads(rezultat.stdout)
+        assert rezultat.returncode == (1 if izlaz["ishod"] == "neuspjeh" else 0)
+        self.izlaz_odgovora = rezultat.stdout + rezultat.stderr
+        return izlaz
+
+    def pitanja_o_radu(self) -> list[dict]:
+        """Sadržaj svakog fajla odgovora, od najstarijeg, bez podešavanja."""
+        folder = self.putanja / "pitanja-o-radu"
+        return [
+            json.loads(putanja.read_text(encoding="utf-8"))
+            for putanja in sorted(folder.glob("*.json"))
+            if putanja.name != "podesavanja.json"
+        ]
+
+    def zapisi_pitanje_o_radu(self, prije: timedelta, chat="mentor", pitanje="Ranije pitanje?") -> None:
+        """Upiše uspješan odgovor kao što ga upisuje komanda, a odgovor je uvijek isti."""
+        odgovor = "Raniji odgovor."
+        vrijeme = datetime.now(UTC) - prije
+        self.zapisi(
+            f"pitanja-o-radu/{vrijeme:%Y-%m-%dT%H%M%S}-{chat}.json",
+            json.dumps(
+                {
+                    "vrijeme": vrijeme.isoformat(timespec="seconds"),
+                    "chat": chat,
+                    "pitanje": pitanje,
+                    "odgovor": odgovor,
+                    "izvjestaji": [],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    def podesavanja(self) -> dict | None:
+        putanja = self.putanja / "pitanja-o-radu/podesavanja.json"
+        return json.loads(putanja.read_text(encoding="utf-8")) if putanja.exists() else None
 
     def poruka(self, datum: str = DATUM) -> subprocess.CompletedProcess:
         return self.pokreni(
@@ -1700,3 +1758,414 @@ def test_svjez_rad_na_plitkoj_kopiji_je_neuspjeh(repo, tmp_path):
     repo.putanja = kopija
 
     assert repo.svjez_rad()["ishod"] == "neuspjeh"
+
+
+# Komanda odgovor: pitanja o radu (ADR 0007).
+
+
+def odgovor_o_radu(
+    tekst="Nemanja je juče radio na izvještajima.", izvjestaji=(), persiranje="bez_promjene"
+) -> dict:
+    return odgovor_sa_tekstom(
+        json.dumps({"tekst": tekst, "izvjestaji": list(izvjestaji), "persiranje": persiranje})
+    )
+
+
+@pytest.fixture
+def pitanja(grok):
+    """Lažni Grok koji odgovara na pitanje o radu umjesto da piše stavke."""
+    grok.vrati(odgovor_o_radu())
+    return grok
+
+
+def test_odgovor_se_cuva_sa_chatom_pitanjem_i_tekstom(repo, pitanja):
+    prije = datetime.now(UTC).replace(microsecond=0)
+
+    izlaz = repo.odgovor("Šta je radio juče?", chat="nemanja")
+
+    assert izlaz["ishod"] == "odgovor"
+    assert izlaz["tekst"] == "Nemanja je juče radio na izvještajima."
+    assert izlaz["persiranje"] == "bez_promjene"
+    [zapis] = repo.pitanja_o_radu()
+    assert zapis["chat"] == "nemanja"
+    assert zapis["pitanje"] == "Šta je radio juče?"
+    assert zapis["odgovor"] == izlaz["tekst"]
+    assert zapis["izvjestaji"] == []
+    assert prije <= datetime.fromisoformat(zapis["vrijeme"]) <= datetime.now(UTC)
+    assert izlaz["fajl"].startswith("pitanja-o-radu/")
+
+
+def datum_prije(dana: int) -> str:
+    return (datetime.now(ZoneInfo("Europe/Belgrade")) - timedelta(days=dana)).date().isoformat()
+
+
+def tvrdi_bez_odgovora(repo: Repo, izlaz: dict, ishod: str) -> None:
+    assert izlaz["ishod"] == ishod
+    assert izlaz["tekst"] == ""
+    assert izlaz["persiranje"] == "bez_promjene"
+    assert repo.pitanja_o_radu() == []
+    assert repo.podesavanja() is None
+
+
+@pytest.mark.parametrize("vrijednost", [TAJNA, PUTANJA], ids=["tajna", "putanja"])
+def test_pitanje_o_radu_sa_tajnom_ili_putanjom_je_odbijeno_bez_groka_i_fajla(
+    repo, pitanja, github, vrijednost
+):
+    repo.biljeska(timedelta(hours=2))
+
+    izlaz = repo.odgovor(f"Šta znači {vrijednost}?")
+
+    tvrdi_bez_odgovora(repo, izlaz, "odbijeno")
+    assert pitanja.zahtjevi == []
+    assert github.trazeno == []
+    assert izlaz["razlog"].startswith("Pitanje ima ")
+    assert vrijednost not in repo.izlaz_odgovora
+
+
+def test_pitanje_o_radu_sa_zabranjenim_pojmom_ide_groku(repo, pitanja):
+    izlaz = repo.odgovor(f"Da li je radio na {POGODAK}?")
+
+    assert izlaz["ishod"] == "odgovor"
+    assert pitanja.ulaz()["pitanje"] == f"Da li je radio na {POGODAK}?"
+
+
+def test_odgovor_sa_zabranjenim_pojmom_je_neuspjeh_bez_fajla(repo, pitanja):
+    pitanja.vrati(odgovor_o_radu(f"Radio je na {POGODAK}.", persiranje="da"))
+
+    izlaz = repo.odgovor()
+
+    tvrdi_bez_odgovora(repo, izlaz, "neuspjeh")
+    assert "zabranjen pojam" in izlaz["razlog"]
+    assert POGODAK not in repo.izlaz_odgovora
+
+
+def test_biljeska_sa_pogotkom_ne_ide_groku_za_odgovor_a_upozorenje_nema_vrijednost(repo, pitanja):
+    dobra = repo.biljeska(timedelta(hours=2), "Dobra bilješka.")
+    repo.biljeska(timedelta(hours=3), f"Bilješka sa {POGODAK}.")
+
+    izlaz = repo.odgovor()
+
+    assert izlaz["ishod"] == "odgovor"
+    assert [b["tekst"] for b in pitanja.ulaz()["biljeske"]] == [dobra]
+    assert POGODAK not in pitanja.poslato()
+    assert len(izlaz["upozorenja"]) == 1
+    assert "zabranjen pojam" in izlaz["upozorenja"][0]
+    assert POGODAK not in repo.izlaz_odgovora
+
+
+def test_podatak_sa_githuba_sa_pogotkom_ne_ide_groku_za_odgovor(repo, pitanja, github):
+    github.issue(naslov=f"Issue sa {POGODAK}")
+    github.issue(naslov="Dobar issue")
+
+    izlaz = repo.odgovor()
+
+    assert [p["naslov"] for p in pitanja.ulaz()["github"]] == ["Dobar issue"]
+    assert POGODAK not in repo.izlaz_odgovora + pitanja.poslato()
+    assert len(izlaz["upozorenja"]) == 1
+
+
+def test_ulaz_za_odgovor_su_i_neaktivni_projekti_a_nepoznat_se_preskace(repo, pitanja, github):
+    repo.biljeska(timedelta(days=10), "Rad na neaktivnom.", NEAKTIVAN)
+    repo.biljeska(timedelta(hours=2), "Privatan rad.", "Nepoznat posao")
+    github.issue(naslov="Issue neaktivnog", repo=NEAKTIVAN_REPO)
+
+    izlaz = repo.odgovor()
+
+    assert izlaz["upozorenja"] == []
+    assert [b["tekst"] for b in pitanja.ulaz()["biljeske"]] == ["Rad na neaktivnom."]
+    assert [(p["naslov"], p["projekat"]) for p in pitanja.ulaz()["github"]] == [
+        ("Issue neaktivnog", NEAKTIVAN)
+    ]
+    assert "Privatan rad" not in pitanja.poslato()
+    assert "dokaz" not in pitanja.ulaz()["github"][0]
+
+
+def test_ulaz_za_odgovor_je_samo_posljednjih_30_dana(repo, pitanja, github):
+    repo.biljeska(timedelta(days=29), "Skorašnja bilješka.")
+    repo.biljeska(timedelta(days=31), "Stara bilješka.")
+    github.issue(timedelta(days=29), naslov="Skorašnji issue")
+    github.issue(timedelta(days=31), naslov="Stari issue")
+    github.commit(timedelta(days=31), poruka="Stari commit")
+    repo.izvjestaj(datum_prije(29), AGENT)
+    repo.izvjestaj(datum_prije(31), AGENT)
+
+    repo.odgovor()
+
+    ulaz = pitanja.ulaz()
+    assert [b["tekst"] for b in ulaz["biljeske"]] == ["Skorašnja bilješka."]
+    assert [p["naslov"] for p in ulaz["github"]] == ["Skorašnji issue"]
+    assert [i["datum"] for i in ulaz["izvjestaji"]] == [datum_prije(29)]
+    stavke = ulaz["izvjestaji"][0]["stavke"]
+    assert [s["kratak_opis"] for s in stavke] == ["Prva stvar", "Druga stvar"]
+    assert "Stari" not in pitanja.poslato()
+
+
+def test_pamcenje_je_5_posljednjih_pitanja_o_radu_sa_istog_chata_iz_24_sata(repo, pitanja):
+    repo.zapisi_pitanje_o_radu(timedelta(hours=25), pitanje="Prestaro?")
+    for sati in range(6, 0, -1):
+        repo.zapisi_pitanje_o_radu(timedelta(hours=sati), pitanje=f"Pitanje prije {sati} h?")
+    repo.zapisi_pitanje_o_radu(timedelta(minutes=30), "nemanja", "Pitanje sa drugog chata?")
+
+    izlaz = repo.odgovor(chat="mentor")
+
+    assert izlaz["upozorenja"] == []
+    razgovor = pitanja.ulaz()["prethodni_razgovor"]
+    assert [z["pitanje"] for z in razgovor] == [f"Pitanje prije {s} h?" for s in range(5, 0, -1)]
+    assert razgovor[-1]["odgovor"] == "Raniji odgovor."
+    assert "Prestaro" not in pitanja.poslato()
+    assert "drugog chata" not in pitanja.poslato()
+
+
+def test_pamcenje_mentora_nikad_ne_ide_nemanji(repo, pitanja):
+    repo.zapisi_pitanje_o_radu(timedelta(minutes=30), "mentor", "Pitanje sa drugog chata?")
+
+    repo.odgovor(chat="nemanja")
+
+    assert pitanja.ulaz()["prethodni_razgovor"] == []
+    assert "drugog chata" not in pitanja.poslato()
+
+
+def test_uspjesan_odgovor_ulazi_u_pamcenje_sljedeceg_pitanja(repo, pitanja):
+    repo.odgovor("Prvo pitanje?")
+    repo.odgovor("A zašto?")
+
+    [prethodni] = pitanja.ulaz()["prethodni_razgovor"]
+    assert prethodni["pitanje"] == "Prvo pitanje?"
+    assert prethodni["odgovor"] == "Nemanja je juče radio na izvještajima."
+    assert len(repo.pitanja_o_radu()) == 2
+
+
+def test_neuspio_odgovor_ne_ulazi_u_pamcenje(repo, pitanja):
+    pitanja.vrati(odgovor_o_radu(f"Radio je na {POGODAK}."))
+    repo.odgovor("Prvo pitanje?")
+    pitanja.vrati(odgovor_o_radu())
+
+    repo.odgovor("A zašto?")
+
+    assert pitanja.ulaz()["prethodni_razgovor"] == []
+
+
+def test_datum_izvjestaja_kog_nema_u_ulazu_je_neuspjeh(repo, pitanja):
+    repo.izvjestaj(datum_prije(2), AGENT)
+    pitanja.vrati(odgovor_o_radu(izvjestaji=[datum_prije(2), datum_prije(40)]))
+
+    izlaz = repo.odgovor()
+
+    tvrdi_bez_odgovora(repo, izlaz, "neuspjeh")
+    assert izlaz["razlog"] == "Grok je vratio datum izvještaja koji nije u ulazu."
+
+
+def test_link_na_izvjestaj_dodaje_python_iz_datuma(repo, pitanja):
+    repo.izvjestaj(datum_prije(1), AGENT)
+    repo.izvjestaj(datum_prije(3), AGENT)
+    datumi = [datum_prije(1), datum_prije(3), datum_prije(1)]
+    pitanja.vrati(odgovor_o_radu("Radio je dva dana.", izvjestaji=datumi))
+
+    izlaz = repo.odgovor()
+
+    assert izlaz["tekst"] == (
+        "Radio je dva dana.\n\n"
+        f"{ADRESA_SAJTA}/izvjestaji/{datum_prije(3)}/\n"
+        f"{ADRESA_SAJTA}/izvjestaji/{datum_prije(1)}/"
+    )
+    [zapis] = repo.pitanja_o_radu()
+    assert zapis["izvjestaji"] == [datum_prije(3), datum_prije(1)]
+    assert zapis["odgovor"] == izlaz["tekst"]
+
+
+@pytest.mark.parametrize("chat", ["mentor", "nemanja"])
+def test_fajl_odgovora_nosi_ime_chata(repo, pitanja, chat):
+    izlaz = repo.odgovor(chat=chat)
+
+    assert izlaz["fajl"].endswith(f"-{chat}.json")
+    assert repo.pitanja_o_radu()[0]["chat"] == chat
+    assert pitanja.ulaz()["chat"] == chat
+
+
+@pytest.mark.parametrize("chat", ["123456789", "grupa", ""])
+def test_chat_koji_nije_mentor_ni_nemanja_je_neuspjeh(repo, pitanja, chat):
+    izlaz = repo.odgovor(chat=chat)
+
+    tvrdi_bez_odgovora(repo, izlaz, "neuspjeh")
+    assert pitanja.zahtjevi == []
+
+
+def test_persiranje_se_upisuje_za_da_i_ne_i_cuva_drugi_chat(repo, pitanja):
+    pitanja.vrati(odgovor_o_radu(persiranje="da"))
+    assert repo.odgovor("Persirajte mi, molim vas.", chat="mentor")["persiranje"] == "da"
+    assert repo.podesavanja() == {"mentor": {"persiranje": True}}
+
+    pitanja.vrati(odgovor_o_radu(persiranje="ne"))
+    repo.odgovor("Može na ti.", chat="nemanja")
+    oba = {"mentor": {"persiranje": True}, "nemanja": {"persiranje": False}}
+    assert repo.podesavanja() == oba
+
+    pitanja.vrati(odgovor_o_radu())
+    repo.odgovor(chat="mentor")
+    assert pitanja.ulaz()["obracanje"] == "vi"
+    repo.odgovor(chat="nemanja")
+    assert pitanja.ulaz()["obracanje"] == "ti"
+    assert repo.podesavanja() == oba
+
+
+def test_bez_promjene_ne_pravi_podesavanja(repo, pitanja):
+    izlaz = repo.odgovor()
+
+    assert izlaz["persiranje"] == "bez_promjene"
+    assert pitanja.ulaz()["obracanje"] == "ti"
+    assert repo.podesavanja() is None
+
+
+def test_pokvarena_podesavanja_uz_promjenu_persiranja_su_neuspjeh_i_ostaju(repo, pitanja):
+    repo.zapisi("pitanja-o-radu/podesavanja.json", f"nije json {POGODAK}")
+    pitanja.vrati(odgovor_o_radu(persiranje="da"))
+
+    izlaz = repo.odgovor()
+
+    assert izlaz["ishod"] == "neuspjeh"
+    assert repo.pitanja_o_radu() == []
+    sadrzaj = (repo.putanja / "pitanja-o-radu/podesavanja.json").read_text(encoding="utf-8")
+    assert sadrzaj == f"nije json {POGODAK}"
+    assert POGODAK not in repo.izlaz_odgovora
+
+
+def test_pokvarena_podesavanja_bez_promjene_su_odgovor_na_ti_uz_upozorenje(repo, pitanja):
+    repo.zapisi("pitanja-o-radu/podesavanja.json", f"nije json {POGODAK}")
+
+    izlaz = repo.odgovor()
+
+    assert izlaz["ishod"] == "odgovor"
+    assert pitanja.ulaz()["obracanje"] == "ti"
+    assert izlaz["upozorenja"] == [
+        "pitanja-o-radu/podesavanja.json: podešavanja nisu mogla da se pročitaju"
+    ]
+    assert POGODAK not in repo.izlaz_odgovora
+
+
+def test_odgovor_duzi_od_3500_znakova_se_skracuje_na_kraju_cijele_recenice(repo, pitanja):
+    # Telegram ne prima poruku dužu od 4096 znakova. Rečenice su različite, da se vidi gdje je rez.
+    recenice = [f"Rečenica broj {broj} kaže nešto o radu, npr. v1.2 i 3.5 sati." for broj in range(100)]
+    pitanja.vrati(odgovor_o_radu(" ".join(recenice)))
+
+    izlaz = repo.odgovor()
+
+    # Prvih 60 rečenica ima 3469 znakova, a sa 61. bi ih bilo 3527.
+    assert izlaz["ishod"] == "odgovor"
+    assert izlaz["tekst"] == " ".join(recenice[:60])
+    assert len(izlaz["tekst"]) == 3469
+    assert repo.pitanja_o_radu()[0]["odgovor"] == izlaz["tekst"]
+
+
+def test_skracen_odgovor_sa_linkovima_staje_u_3500_znakova(repo, pitanja):
+    datumi = [datum_prije(dana) for dana in range(1, 11)]
+    for datum in datumi:
+        repo.izvjestaj(datum, AGENT)
+    recenice = [f"Rečenica broj {broj} o radu." for broj in range(300)]
+    pitanja.vrati(odgovor_o_radu(" ".join(recenice), izvjestaji=datumi))
+
+    tekst = repo.odgovor()["tekst"]
+
+    assert len(tekst) <= 3500
+    pocetak, linkovi = tekst.split("\n\n")
+    assert pocetak.endswith(".")
+    assert pocetak in " ".join(recenice)
+    assert len(linkovi.splitlines()) == 10
+
+
+def test_odgovor_do_3500_znakova_se_ne_skracuje(repo, pitanja):
+    tekst = "Radio je mnogo. " * 218 + "Kraj"
+    assert len(tekst) <= 3500
+    pitanja.vrati(odgovor_o_radu(tekst))
+
+    assert repo.odgovor()["tekst"] == tekst
+
+
+def test_dugacak_odgovor_bez_nalaza_iz_adr_0002_prolazi(repo, pitanja):
+    # Provjera bilješke ima i ograničenje dužine, a za odgovor se gledaju samo nalazi iz ADR 0002.
+    pitanja.vrati(odgovor_o_radu("Radio je mnogo. " * 200))
+
+    assert repo.odgovor()["ishod"] == "odgovor"
+
+
+def test_zahtjev_za_odgovor_ima_model_semu_i_uputstvo(repo, pitanja, agent):
+    repo.odgovor()
+
+    zahtjev = pitanja.zahtjevi[0]
+    assert zahtjev["model"] == "grok-4.7"
+    assert zahtjev["store"] is False
+    assert zahtjev["input"][0] == {"role": "system", "content": agent.UPUTSTVO_ZA_ODGOVOR}
+    format_odgovora = zahtjev["text"]["format"]
+    assert format_odgovora["strict"] is True
+    sema = format_odgovora["schema"]
+    assert set(sema["properties"]) == set(sema["required"]) == {"tekst", "izvjestaji", "persiranje"}
+    assert sema["properties"]["persiranje"]["enum"] == ["da", "ne", "bez_promjene"]
+
+
+@pytest.mark.parametrize(
+    "sadrzaj",
+    [
+        "nije json",
+        json.dumps({"tekst": "Tekst.", "izvjestaji": []}),
+        json.dumps({"tekst": "Tekst.", "izvjestaji": [], "persiranje": "mozda"}),
+        json.dumps({"tekst": "  ", "izvjestaji": [], "persiranje": "da"}),
+        json.dumps({"tekst": "Tekst.", "izvjestaji": "2030-05-15", "persiranje": "da"}),
+    ],
+)
+def test_los_odgovor_groka_na_pitanje_je_neuspjeh(repo, pitanja, sadrzaj):
+    pitanja.vrati(odgovor_sa_tekstom(sadrzaj))
+
+    tvrdi_bez_odgovora(repo, repo.odgovor(), "neuspjeh")
+
+
+def test_nedovrsen_odgovor_groka_na_pitanje_je_neuspjeh(repo, pitanja):
+    pitanja.vrati(odgovor_sa_tekstom(json.dumps({"tekst": "Tekst."}), status="incomplete"))
+
+    tvrdi_bez_odgovora(repo, repo.odgovor(), "neuspjeh")
+
+
+def test_grok_za_odgovor_ponavlja_brzu_gresku(repo, pitanja):
+    pitanja.vrati_sirovo((503, b"greska"), (200, json.dumps(odgovor_o_radu()).encode()))
+
+    assert repo.odgovor()["ishod"] == "odgovor"
+    assert len(pitanja.zahtjevi) == 2
+
+
+def test_ponovni_pokusaj_koji_ne_stane_u_rok_ne_ide(repo, pitanja):
+    pitanja.kasnjenje = 1.0
+    okruzenje = {**repo.okruzenje(), "XAI_ROK_ODGOVORA": "0.6", "AGENT_ROK_ODGOVORA": "1.0"}
+
+    izlaz = repo.odgovor(okruzenje=okruzenje)
+
+    tvrdi_bez_odgovora(repo, izlaz, "neuspjeh")
+    assert len(pitanja.zahtjevi) == 1
+    assert izlaz["razlog"] == (
+        "Grok nije odgovorio (isteklo vrijeme), a ponovni pokušaj ne stane u rok."
+    )
+
+
+def test_rokovi_za_odgovor(agent):
+    # Worker čeka 5 minuta od pokretanja, a jedan pokušaj Groka traje najviše 150 sekundi.
+    assert agent.ROK_GROKA_ZA_ODGOVOR == 150
+    assert agent.ROK_ODGOVORA == 300
+
+
+def test_uputstvo_za_odgovor_nikad_ne_upucuje_na_nemanju(agent):
+    uputstvo = agent.UPUTSTVO_ZA_ODGOVOR
+    assert "nikad ne upućuj na Nemanju" in uputstvo
+    assert '"pitaj Nemanju"' in uputstvo
+    assert "o tome nema zapisa" in uputstvo
+    assert "nikad ne tvrdi ništa netačno" in uputstvo
+    assert "si tu da pričaš o tome šta je Nemanja uradio, pa se vrati na temu" in uputstvo
+    assert "o Nemanji uvijek u trećem licu" in uputstvo
+    assert "6-8 rečenica" in uputstvo
+
+
+def test_odgovor_radi_na_plitkoj_kopiji(repo, pitanja, tmp_path):
+    # Ulaz se bira po vremenu, a ne po istoriji, pa workflow-u treba samo plitka kopija.
+    kopija = tmp_path / "plitka"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", repo.putanja.as_uri(), str(kopija)], check=True
+    )
+    repo.putanja = kopija
+
+    assert repo.odgovor()["ishod"] == "odgovor"
