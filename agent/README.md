@@ -1,6 +1,6 @@
 # Agent za izvještaje
 
-Od bilješki sesija u privatnom repou i rada na GitHub-u pravi fajl izvještaja i tekst mentorove poruke, a provjeri prije pitanja daje vrijeme posljednjeg svježeg rada. Commit, objavu i slanje radi workflow iz #26.
+Od bilješki sesija u privatnom repou i rada na GitHub-u pravi fajl izvještaja i tekst mentorove poruke, provjeri prije pitanja daje vrijeme posljednjeg svježeg rada, a na pitanje o radu piše odgovor. Commit, objavu i slanje radi workflow iz #26.
 
 ## Podešavanje
 
@@ -115,10 +115,56 @@ Na stdout ispiše tekst poruke: naslov, numerisan sažetak i link složen iz dat
 
 Naslov se računa iz autora prvog commita fajla, isto kao oznaka porijekla na sajtu: `🤖 Izvještaj za ...` za izvještaj agenta, i ručno ispravljen, a `✍️ Izvještaj (napisano ručno) za ...` za sve ostalo. Zato se komanda poziva poslije commita, jer se necommit-ovan fajl računa kao ručno napisan.
 
+## Odgovor o radu
+
+```sh
+XAI_API_KEY=... AGENT_GITHUB_TOKEN=... python agent/agent.py odgovor --chat mentor --pitanje "Šta je Nemanja radio juče?" --repo ../progress-report-izvjestaji --adresa-sajta https://adresa-sajta
+```
+
+Komanda piše odgovor na pitanje o radu preko Groka (ADR 0007). `--chat` je `mentor` ili `nemanja`, nikad ID chata. Adresa sajta se prosljeđuje kao i za poruku, jer od nje Python slaže linkove na izvještaje. Na stdout ispiše jedan JSON red, a izlazni kod je 1 samo za neuspjeh:
+
+| `ishod` | Značenje | Ostala polja |
+|---|---|---|
+| `odgovor` | odgovor je prošao provjeru i upisan je u `pitanja-o-radu/` | `tekst`, `persiranje`, `fajl` |
+| `odbijeno` | pitanje ima obrazac tajne ili putanju, pa nije poslato Groku ni sačuvano | `tekst`, `persiranje`, `razlog` |
+| `neuspjeh` | nema odgovora ni fajla | `tekst`, `persiranje`, `razlog` |
+
+`tekst` je prazan, a `persiranje` je `bez_promjene` za sve osim ishoda `odgovor`. I ovdje uvijek postoji `upozorenja`. `razlog` i `upozorenja` nikad ne sadrže vrijednost iz pitanja, ulaza ni odgovora, pa idu Nemanji. `tekst` je odgovor za chat i ne smije u log workflow-a. Commit radi workflow, pod imenom `progress-report-agent`, i obuhvata `fajl` i `pitanja-o-radu/podesavanja.json`.
+
+Plitka kopija repoa je dovoljna, jer se ulaz bira po vremenu, a ne po istoriji.
+
+### Provjera pitanja
+
+Pitanje se prvo provjeri komandom `napravi_sajt.py --provjeri-biljesku`, kao tekst bilješke u privremenom fajlu van repoa. Nalaz `ima obrazac tajne ili ključa` ili `ima putanju sa računara` daje ishod `odbijeno`: ništa se ne čita, Grok se ne zove i ništa se ne upisuje. Zabranjen pojam u pitanju se pušta, jer ga je napisao onaj ko pita. Ostali nalazi (npr. dužina) se za pitanje ne gledaju.
+
+### Ulaz
+
+Za posljednjih 30 dana, od trenutka pokretanja:
+
+- izvještaji iz `izvjestaji/` čiji je datum u tom periodu, po zoni `Europe/Belgrade`. Groku idu datum i stavke sa oznakama dokaza, bez linkova. Izvještaj koji ne može da se pročita dodaje upozorenje i ne ide Groku;
+- bilješke sa projektom iz `projekti.json`, aktivnim ili neaktivnim, po istim pravilima i istoj provjeri kao za pisanje. Bilješke sa projektom kog nema se preskaču bez upozorenja;
+- issue-i, PR-ovi i commitovi iz `repoi` svih projekata iz `projekti.json`, po istim pravilima i istoj provjeri kao za pisanje, ali bez ID-a dokaza;
+- pamćenje: do 5 posljednjih odgovora sa istog chata iz posljednja 24 sata, iz `pitanja-o-radu/`. Pamćenje jednog chata nikad ne ide drugom;
+- oblik obraćanja (`ti` ili `vi`) iz `pitanja-o-radu/podesavanja.json`.
+
+Za razliku od pisanja, ništa iz ulaza nije obavezno: bez ijednog podatka Grok i dalje odgovara da o tome nema zapisa.
+
+### Grok
+
+Isti model i ista podešavanja kao za pisanje, sa šemom `tekst`, `izvjestaji` (datumi izvještaja iz kojih odgovor dolazi) i `persiranje` (`da`, `ne` ili `bez_promjene`). Rok jednog pokušaja je 150 s. Ponovni pokušaj ide samo ako sa pauzom i rokom stane u 5 minuta od pokretanja komande, jer Worker toliko čeka odgovor.
+
+Odgovor sa datumom izvještaja kog nema u ulazu je `neuspjeh`. Linkove `ADRESA/izvjestaji/GGGG-MM-DD/` dodaje Python na kraj teksta, po jedan u redu, od najstarijeg.
+
+### Provjera i čuvanje
+
+Gotov odgovor, sa linkovima, prolazi `napravi_sajt.py --provjeri-biljesku` kao tekst u privremenom fajlu van repoa. Obrazac tajne, putanja i zabranjen pojam daju `neuspjeh`. Ostali nalazi provjere bilješke (npr. dužina) se za odgovor ne gledaju. Agent prepoznaje nalaze po tekstu poruke provjere, pa promjena tih poruka u `napravi_sajt.py` mora da prati i `agent.py`.
+
+Uspješan odgovor dobija fajl `pitanja-o-radu/GGGG-MM-DDTHHMMSS-chat.json` (vrijeme po UTC-u), sa poljima `vrijeme`, `chat`, `pitanje`, `odgovor` i `izvjestaji`. Persiranje se upisuje u `pitanja-o-radu/podesavanja.json` samo kad Grok vrati `da` ili `ne`, u obliku `{"mentor": {"persiranje": true}}`. Podešavanja drugog chata ostaju. Pokvaren fajl podešavanja dodaje upozorenje, a obraćanje je na „ti”. Ako bi persiranje trebalo upisati, ishod je `neuspjeh`, da upis ne prepiše pokvaren fajl. Odbijeno pitanje i neuspio odgovor ne upisuju ništa.
+
 ## Testovi
 
 ```sh
 .venv/Scripts/python -m pytest
 ```
 
-Testovi rade nad privremenim git repoom, sa lažnim xAI serverom (`XAI_ADRESA`, `XAI_PAUZA`, `XAI_ROK`), lažnim GitHub serverom (`AGENT_GITHUB_ADRESA`, `AGENT_GITHUB_PAUZA`), lažnom komandom provjere i, za prelazak na zimsko vrijeme, zadatim satom (`AGENT_SADA`), pa ne traže privatni repo, ključ ni token. Pravu vezu sa provjerom potvrđuje proba cijelog puta (#32). GitHub Actions (`.github/workflows/testovi.yml`) ih pokreće na push u `main` i na svaki pull request.
+Testovi rade nad privremenim git repoom, sa lažnim xAI serverom (`XAI_ADRESA`, `XAI_PAUZA`, `XAI_ROK`, `XAI_ROK_ODGOVORA`, `AGENT_ROK_ODGOVORA`), lažnim GitHub serverom (`AGENT_GITHUB_ADRESA`, `AGENT_GITHUB_PAUZA`), lažnom komandom provjere i, za prelazak na zimsko vrijeme, zadatim satom (`AGENT_SADA`), pa ne traže privatni repo, ključ ni token. Pravu vezu sa provjerom potvrđuje proba cijelog puta (#32). GitHub Actions (`.github/workflows/testovi.yml`) ih pokreće na push u `main` i na svaki pull request.
