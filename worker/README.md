@@ -1,8 +1,8 @@
 # Worker
 
-Prima "završio", "odloži" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, poslije 23:00 sam pokreće pisanje u GitHub Actions kad prođe 40 minuta bez rada i šalje poruku iz rezultata (ADR 0004, ADR 0008). Mentoru poruke šalje samo Worker.
+Prima "završio", "odloži" i dugmad sa Telegrama, pamti posljednju aktivnost iz hooka, pita Nemanju da li je završio, poslije 23:00 sam pokreće pisanje u GitHub Actions kad prođe 40 minuta bez rada, šalje poruku iz rezultata i ujutru pokreće jutarnju provjeru (ADR 0004, ADR 0008, ADR 0010). Mentoru poruke šalje samo Worker.
 
-Jutarnju provjeru radi `jutarnja-provjera.yml` u privatnom repou, a ne Worker, da bi otkrila i kvar Workera. Od Workera samo čita stanje dana (`GET /actions/stanje`).
+Jutarnju provjeru radi `jutarnja-provjera.yml` u privatnom repou, a Worker je samo pokreće (ADR 0010). Provjera je u workflow-u da bi otkrila i kvar Workera, a od Workera samo čita stanje dana (`GET /actions/stanje`).
 
 ## Kako radi
 
@@ -45,6 +45,14 @@ Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lo
 - **Neuspjeh.** Mentor ne dobija ništa, pa ni "Danas nema zabilježenog rada". Dan ostaje nezatvoren, a rad ulazi u sljedeći izvještaj. Dok radni dan traje, upozorenje Nemanji nudi "završio" za novi pokušaj. Kad prođe, npr. poslije neuspjeha u 1:00, upozorenje kaže da rad ulazi u sljedeći izvještaj, jer "završio" tada ne pokreće ništa do 5:00, a od 5:00 pokreće novi dan.
 - **Upozorenje o slanju.** Ako slanje ne uspije od 23:00 nadalje, Nemanja jednom dobija upozorenje. Ranije se slanje samo ponavlja.
 - **Dvostruko slanje.** Cron ne ponavlja slanje pokušano u posljednjih minut, pa ne šalje poruku koju ruta baš tada šalje. Ako Worker padne poslije poruke, a prije upisa `zatvoren`, ili odgovor Telegrama ne stigne, poruka može da ode dvaput. Telegram nema ključ koji bi to spriječio, a dvije iste poruke su bolje od poruke koja nikad ne stigne.
+
+## Jutarnja provjera
+
+Cron pokreće `jutarnja-provjera.yml` jednom dnevno, u prvom cron-u od 6:30 UTC, sa ulazom `datum`: jučerašnji radni dan (ADR 0010). Tada je po lokalnom vremenu bar 7:30, pa je to jučerašnji datum, a datum se računa po UTC-u, pa ga ne pomjera ni ponoć po lokalnom vremenu.
+
+- **Jednom za datum.** Worker u bazi pamti datum za koji je provjeru pokrenuo, pa je ostali cron-ovi tog dana ne pokreću ponovo. Od dva istovremena cron-a pokreće je samo jedan.
+- **Nadoknada.** Ako GitHub ne pokrene workflow ili cron izostane, pokušava sljedeći cron, do kraja dana po UTC-u.
+- **Rezerva.** `schedule` u workflow-u ostaje. Po ADR 0010 workflow prvo pogleda da li je provjera za taj dan već urađena, da rezervno pokretanje ne pošalje istu poruku drugi put. Kad Worker ne radi, ili padne između upisa i pokretanja, provjeru pokreće samo `schedule`, pa poruka o kvaru može da kasni.
 
 ## Samostalno slanje poslije 23:00
 
@@ -217,7 +225,7 @@ Aktivnost mijenja samo vrijeme. Zatvoren dan ostaje zatvoren, pisanje koje je u 
 
 ### Ono što Worker očekuje od privatnog repoa
 
-Worker pokreće `pisanje-i-objava.yml` na grani `main`, sa ulazom `datum`, i `provjera-svjezeg-rada.yml` na grani `main`, sa ulazima `datum` i `oznaka`. Workflow ne računa datum sam.
+Worker pokreće `pisanje-i-objava.yml` i `jutarnja-provjera.yml` na grani `main`, sa ulazom `datum`, i `provjera-svjezeg-rada.yml` na grani `main`, sa ulazima `datum` i `oznaka`. Workflow ne računa datum sam.
 
 ## Probni režim
 
