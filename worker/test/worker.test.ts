@@ -25,6 +25,7 @@ const ENV = {
   KLJUC_ACTIONS,
   KLJUC_HOOKA,
   PROBNI_REZIM: "ukljucen",
+  PITANJA_MENTORA: undefined as string | undefined,
 };
 
 type Env = typeof ENV;
@@ -2519,6 +2520,304 @@ describe("pitanja o radu", () => {
       await pitaj("Pitanje");
 
       expect(tekstovi()).toEqual([RAZMISLJAM, NEUSPJEH, GRESKA_GITHUB]);
+    });
+  });
+
+  describe("pitanja mentora", () => {
+    const UKLJUCENA = { ...ENV, PROBNI_REZIM: "iskljucen", PITANJA_MENTORA: "ukljucena" };
+    const LIMIT = "Za danas je potrošen dnevni broj pitanja. Možeš ponovo sutra.";
+    const UVODNA =
+      "Od danas možeš i da me pitaš šta je Nemanja radio, npr. „Šta je Nemanja radio juče?” ili „Kako je uradio pitanja o radu?”. " +
+      "Odgovaram iz izvještaja, bilješki i GitHub-a za posljednjih 30 dana, obično za minut-dva. Dnevno možeš da postaviš do 15 pitanja.";
+    const GRESKA_ROK_MENTOR = 'Pitanje o radu sa chata „mentor" nije dobilo odgovor: odgovor nije stigao u roku od 5 minuta.';
+
+    const pitajMentor = (tekst: string, env: Partial<Env> = UKLJUCENA) => pitaj(tekst, CHAT_MENTOR, env);
+    const naMentorov = () => porukeNaChat(CHAT_MENTOR).map((poruka) => poruka.tekst);
+    const naNemanjin = () => porukeNaChat(CHAT_NEMANJA).map((poruka) => poruka.tekst);
+    const posljednjeMentorovo = () =>
+      [...pokretanjaPitanja].reverse().find((pokretanje) => (pokretanje.telo as any).inputs.chat === "mentor")!;
+    const oznakaMentora = () => (posljednjeMentorovo().telo as { inputs: { oznaka: string } }).inputs.oznaka;
+    const javiMentoru = (ishod: string, tekst = "", persiranje = "bez_promjene") =>
+      pozovi(odgovorZahtjev({ oznaka: oznakaMentora(), ishod, tekst, persiranje }), UKLJUCENA);
+
+    async function odgovoreno(broj: number) {
+      for (let i = 1; i <= broj; i++) {
+        await pitajMentor(`Pitanje ${i}`);
+        await javiMentoru("odgovor", `Odgovor ${i}`);
+      }
+    }
+
+    describe("prekidač", () => {
+      it.each([
+        ["fali", { ...ENV, PROBNI_REZIM: "iskljucen" }],
+        ["nije tačno ukljucena", { ...ENV, PROBNI_REZIM: "iskljucen", PITANJA_MENTORA: "Ukljucena" }],
+        ["je iskljucena", { ...ENV, PROBNI_REZIM: "iskljucen", PITANJA_MENTORA: "iskljucena" }],
+        ["je ukljucena, a probni režim je uključen", { ...ENV, PITANJA_MENTORA: "ukljucena" }],
+        ["je ukljucena, a probni režim nije podešen", { ...ENV, PROBNI_REZIM: undefined, PITANJA_MENTORA: "ukljucena" }],
+      ])("kad %s, mentorova poruka se tiho preskače i nema uvodne poruke", async (_ime, env) => {
+        expect((await pitajMentor("Šta je Nemanja radio?", env)).status).toBe(200);
+        expect((await pozovi(porukaBezTeksta({ sticker: { file_id: "x" } }, CHAT_MENTOR), env)).status).toBe(200);
+        await cron(env);
+
+        expect(poruke).toEqual([]);
+        expect(pokretanjaPitanja).toEqual([]);
+        expect(await tekstoviUBazi()).toEqual([]);
+      });
+
+      it("kad je uključen, mentorova poruka dobija potvrdu i pokreće pitanje sa chatom mentor", async () => {
+        expect((await pitajMentor(" Šta je Nemanja radio juče? ")).status).toBe(200);
+
+        expect(poruke).toEqual([{ chat: CHAT_MENTOR, tekst: RAZMISLJAM }]);
+        expect(pokretanjaPitanja).toHaveLength(1);
+        expect(ulazi()).toEqual({ chat: "mentor", oznaka: expect.any(String), pitanje: "Šta je Nemanja radio juče?" });
+
+        await javiMentoru("odgovor", "Juče je radio na Workeru.");
+        expect(naMentorov()).toEqual([RAZMISLJAM, "Juče je radio na Workeru."]);
+        expect(naNemanjin()).toEqual([]);
+      });
+
+      it.each(["završio", "odloži"])("sa mentorovog chata %j je pitanje, a ne komanda", async (tekst) => {
+        await pitajMentor(tekst);
+
+        expect(pitanja()).toEqual([tekst]);
+        expect(pisanja()).toEqual([]);
+        expect(naMentorov()).toEqual([RAZMISLJAM]);
+      });
+
+      it("mentorova poruka bez teksta dobija poruku da odgovara samo na tekst", async () => {
+        await pozovi(porukaBezTeksta({ voice: { file_id: "x" } }, CHAT_MENTOR), UKLJUCENA);
+
+        expect(poruke).toEqual([{ chat: CHAT_MENTOR, tekst: SAMO_TEKST }]);
+        expect(pokretanjaPitanja).toEqual([]);
+      });
+
+      it("ne mijenja stanje radnog dana", async () => {
+        await pitajMentor("Šta je Nemanja radio?");
+        await javiMentoru("odgovor", "Odgovor.");
+
+        expect(await posljednjaAktivnost()).toBeNull();
+        expect(pisanja()).toEqual([]);
+      });
+    });
+
+    describe("odvojeni razgovori", () => {
+      it("mentor nikad ne vidi Nemanjina pitanja ni odgovore njemu, a redovi ne čekaju jedan drugog", async () => {
+        await pitaj("Nemanjino tajno pitanje", CHAT_NEMANJA, UKLJUCENA);
+        const nemanjina = ulazi().oznaka;
+        await pitajMentor("Mentorovo pitanje");
+
+        expect(pokretanjaPitanja).toHaveLength(2);
+        expect(ulazi()).toEqual({ chat: "mentor", oznaka: expect.any(String), pitanje: "Mentorovo pitanje" });
+
+        await pozovi(odgovorZahtjev({ oznaka: nemanjina, ishod: "odgovor", tekst: "Odgovor Nemanji.", persiranje: "bez_promjene" }));
+        await javiMentoru("odgovor", "Odgovor mentoru.");
+
+        expect(naMentorov()).toEqual([RAZMISLJAM, "Odgovor mentoru."]);
+        expect(naNemanjin()).toEqual([RAZMISLJAM, "Odgovor Nemanji."]);
+      });
+
+      it("rok mentorovog pitanja: mentor dobija poruku o neuspjehu, a Nemanja grešku bez teksta pitanja", async () => {
+        await pitajMentor("Mentorovo tajno pitanje");
+        poruke = [];
+
+        await cronU("2030-05-15T10:05:00Z", UKLJUCENA);
+
+        expect(naMentorov()).toEqual([NEUSPJEH, UVODNA]);
+        expect(naNemanjin()).toEqual([GRESKA_ROK_MENTOR]);
+      });
+    });
+
+    describe("limit", () => {
+      it("16. pitanje dobija poruku o limitu, ne ulazi u red i ne pokreće ništa", async () => {
+        await odgovoreno(15);
+        poruke = [];
+
+        await pitajMentor("Šesnaesto");
+
+        expect(naMentorov()).toEqual([LIMIT]);
+        expect(pokretanjaPitanja).toHaveLength(15);
+        expect(await tekstoviUBazi()).toEqual([]);
+      });
+
+      it("pokretanje koje je u toku se broji", async () => {
+        await odgovoreno(14);
+        await pitajMentor("Petnaesto");
+        poruke = [];
+
+        await pitajMentor("Šesnaesto");
+
+        expect(naMentorov()).toEqual([LIMIT]);
+        expect(await tekstoviUBazi()).toEqual(["Petnaesto"]);
+      });
+
+      it("poruke spojene u jedno pitanje broje se kao jedno", async () => {
+        await odgovoreno(13);
+        await pitajMentor("Četrnaesto");
+        await pitajMentor("Petnaesto, prvi dio");
+        await pitajMentor("Petnaesto, drugi dio");
+        await javiMentoru("odgovor", "Odgovor 14");
+        await javiMentoru("odgovor", "Odgovor 15");
+        poruke = [];
+
+        await pitajMentor("Šesnaesto");
+
+        expect(pitanja().slice(-2)).toEqual(["Četrnaesto", "Petnaesto, prvi dio\nPetnaesto, drugi dio"]);
+        expect(naMentorov()).toEqual([LIMIT]);
+      });
+
+      it("neuspjela i odbijena pitanja, istekao rok i poruke bez teksta se ne broje", async () => {
+        await odgovoreno(14);
+        for (const ishod of ["neuspjeh", "odbijeno", "neuspjeh"]) {
+          await pitajMentor("Ne broji se");
+          await javiMentoru(ishod);
+        }
+        await pitajMentor("Bez odgovora");
+        await cronU("2030-05-15T10:05:00Z", UKLJUCENA);
+        await pozovi(porukaBezTeksta({ sticker: { file_id: "x" } }, CHAT_MENTOR), UKLJUCENA);
+        githubPada = true;
+        await pitajMentor("GitHub ne pokrene");
+        githubPada = false;
+        poruke = [];
+
+        await pitajMentor("Petnaesto");
+        expect(naMentorov()).toEqual([RAZMISLJAM]);
+        await javiMentoru("odgovor", "Odgovor 15");
+
+        await pitajMentor("Šesnaesto");
+        expect(naMentorov().at(-1)).toBe(LIMIT);
+      });
+
+      it("broj se obnavlja u ponoć po lokalnom vremenu", async () => {
+        await odgovoreno(15);
+        poruke = [];
+
+        vi.setSystemTime(new Date("2030-05-15T21:59:00Z"));
+        await pitajMentor("U 23:59");
+        expect(naMentorov()).toEqual([LIMIT]);
+
+        vi.setSystemTime(new Date("2030-05-15T22:00:00Z"));
+        await pitajMentor("U ponoć");
+        expect(naMentorov()).toEqual([LIMIT, RAZMISLJAM]);
+        expect(pitanja().at(-1)).toBe("U ponoć");
+      });
+
+      it("Nemanjina pitanja nemaju limit i ne troše mentorov", async () => {
+        for (let i = 1; i <= 16; i++) {
+          await pitaj(`Nemanjino ${i}`, CHAT_NEMANJA, UKLJUCENA);
+          await javi("odgovor", `Odgovor ${i}`);
+        }
+
+        expect(naNemanjin()).not.toContain(LIMIT);
+        await pitajMentor("Mentorovo");
+        expect(naMentorov()).toEqual([RAZMISLJAM]);
+      });
+    });
+
+    describe("persiranje", () => {
+      it("\"da\" prebacuje stalne poruke na \"vi\", a \"bez_promjene\" ih ostavlja", async () => {
+        await pitajMentor("Možete li da mi persirate?");
+        await javiMentoru("odgovor", "Naravno.", "da");
+        await pitajMentor("Prvo");
+        await javiMentoru("neuspjeh");
+        await pitajMentor("Drugo");
+        await javiMentoru("odbijeno");
+        await pitajMentor("Treće");
+        await cronU("2030-05-15T10:10:00Z", UKLJUCENA);
+
+        expect(naMentorov().filter((tekst) => tekst !== RAZMISLJAM && tekst !== UVODNA)).toEqual([
+          "Naravno.",
+          "Trenutno ne mogu da odgovorim, pokušajte ponovo za nekoliko minuta.",
+          "Ovo pitanje ne mogu da obradim jer sadrži nešto što liči na lozinku, ključ ili putanju. Napišite ga bez toga.",
+          "Trenutno ne mogu da odgovorim, pokušajte ponovo za nekoliko minuta.",
+        ]);
+      });
+
+      it("poruka o limitu ide na \"vi\"", async () => {
+        await pitajMentor("Persirajte mi");
+        await javiMentoru("odgovor", "U redu.", "da");
+        await odgovoreno(14);
+        poruke = [];
+
+        await pitajMentor("Šesnaesto");
+
+        expect(naMentorov()).toEqual(["Za danas je potrošen dnevni broj pitanja. Možete ponovo sutra."]);
+      });
+
+      it("\"ne\" vraća na \"ti\"", async () => {
+        await pitajMentor("Persirajte mi");
+        await javiMentoru("odgovor", "U redu.", "da");
+        await pitajMentor("Može na ti");
+        await javiMentoru("odgovor", "Važi.", "ne");
+        await pitajMentor("Pitanje");
+        poruke = [];
+
+        await javiMentoru("neuspjeh");
+
+        expect(naMentorov()).toEqual([NEUSPJEH]);
+      });
+
+      it("pamti se po chatu, pa mentorovo persiranje ne mijenja poruke Nemanji", async () => {
+        await pitajMentor("Persirajte mi");
+        await javiMentoru("odgovor", "U redu.", "da");
+        await pitaj("Moje pitanje", CHAT_NEMANJA, UKLJUCENA);
+        poruke = [];
+
+        await javi("neuspjeh");
+
+        expect(naNemanjin()).toEqual([NEUSPJEH]);
+      });
+
+      it("javljanje sa starom oznakom ne upisuje persiranje", async () => {
+        await pitajMentor("Prvo");
+        const stara = oznakaMentora();
+        await javiMentoru("odgovor", "Odgovor.");
+        await pozovi(odgovorZahtjev({ oznaka: stara, ishod: "odgovor", tekst: "Kasni.", persiranje: "da" }));
+        await pitajMentor("Drugo");
+        poruke = [];
+
+        await javiMentoru("neuspjeh");
+
+        expect(naMentorov()).toEqual([NEUSPJEH]);
+      });
+    });
+
+    describe("uvodna poruka", () => {
+      it("ide mentoru tačno jednom, na prvi cron poslije uključivanja", async () => {
+        await cron({ ...ENV, PROBNI_REZIM: "iskljucen" });
+        expect(poruke).toEqual([]);
+
+        await cronU("2030-05-15T10:05:00Z", UKLJUCENA);
+        await cronU("2030-05-15T10:10:00Z", UKLJUCENA);
+        await cronU("2030-05-16T10:00:00Z", UKLJUCENA);
+
+        expect(poruke).toEqual([{ chat: CHAT_MENTOR, tekst: UVODNA }]);
+      });
+
+      it("dva cron-a u isto vrijeme šalju je jednom", async () => {
+        await Promise.all([cron(UKLJUCENA), cron(UKLJUCENA)]);
+
+        expect(naMentorov()).toEqual([UVODNA]);
+      });
+
+      it("ako slanje ne uspije, šalje se sljedećim cron-om", async () => {
+        mentorPada = true;
+        await cronU("2030-05-15T10:05:00Z", UKLJUCENA);
+        expect(naMentorov()).toEqual([]);
+
+        mentorPada = false;
+        await cronU("2030-05-15T10:10:00Z", UKLJUCENA);
+        await cronU("2030-05-15T10:15:00Z", UKLJUCENA);
+
+        expect(naMentorov()).toEqual([UVODNA]);
+      });
+
+      it("ne ide dok je probni režim uključen, ni Nemanji", async () => {
+        await cron({ ...ENV, PITANJA_MENTORA: "ukljucena" });
+        expect(poruke).toEqual([]);
+
+        await cronU("2030-05-15T10:05:00Z", UKLJUCENA);
+        expect(poruke).toEqual([{ chat: CHAT_MENTOR, tekst: UVODNA }]);
+      });
     });
   });
 });

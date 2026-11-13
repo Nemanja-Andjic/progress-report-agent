@@ -32,7 +32,7 @@ Rezultat koji stigne van faze `pisanje` ništa ne radi. Ako slanje ne uspije, ru
 
 ## Cron
 
-Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lokalno vrijeme. Svaki put gleda današnji dan i ranije dane koji su još u fazi `pisanje` ili `bez_poruke`, a do 2:00 i jučerašnji dan. Gleda i redove pitanja o radu, zbog roka (vidi "Pitanja o radu").
+Okidač radi svakih 5 minuta po UTC-u (`wrangler.toml`), a Worker sam računa lokalno vrijeme. Svaki put gleda današnji dan i ranije dane koji su još u fazi `pisanje` ili `bez_poruke`, a do 2:00 i jučerašnji dan. Gleda i redove pitanja o radu, zbog roka, i šalje uvodnu poruku mentoru dok nije poslata (vidi "Pitanja o radu").
 
 | Faza | Šta cron radi |
 |---|---|
@@ -133,7 +133,7 @@ Na pitanje bez odgovora nema novog pitanja dok se ne pojavi nova aktivnost. Posl
 
 ## Pitanja o radu
 
-Nemanja može botu da postavi pitanje o svom radu (ADR 0007). Sa njegovog chata svaka poruka osim "završio" i "odloži" je pitanje o radu. Mentorova pitanja se za sad tiho preskaču, kao i poruke sa ostalih chatova, a uključuju se u #60.
+Mentor i Nemanja mogu botu da postave pitanje o Nemanjinom radu, svako sa svog chata (ADR 0007). Sa Nemanjinog chata svaka poruka osim "završio" i "odloži" je pitanje o radu. Sa mentorovog chata svaka poruka je pitanje o radu, pa i "završio", ali samo dok su pitanja mentora uključena (vidi ispod). Poruke sa ostalih chatova se tiho preskaču.
 
 - **Potvrda.** Na svako pitanje bot odmah odgovori "Razmišljam, odgovor stiže za minut-dva.", pa i na ono koje čeka u redu.
 - **Bez teksta.** Slika, glasovna poruka ili stiker dobijaju "Mogu da odgovorim samo na pitanja napisana tekstom." i ništa ne pokreću. Potpis uz sliku se ne čita.
@@ -143,12 +143,22 @@ Nemanja može botu da postavi pitanje o svom radu (ADR 0007). Sa njegovog chata 
 - **Odgovor.** Ide samo na chat pokretanja, sa zvukom, i nikad na drugi chat. Zatim kreće sljedeće pitanje iz reda.
 - **Rok.** 5 minuta od pokretanja. Ako odgovor ne stigne do tada, prvi sljedeći cron ili poruka na tom chatu ga proglasi neuspjelim: chat dobija "Trenutno ne mogu da odgovorim, pokušaj ponovo za nekoliko minuta.", Nemanja poruku o grešci bez teksta pitanja, a red ide dalje. Kad GitHub ne pokrene workflow, isto se desi odmah.
 - **Tekst u bazi.** Tekst pitanja je u D1 samo dok čeka u redu ili dok je pokretanje u toku. Briše se kad stigne javljanje ili istekne rok.
+- **Odvojeni razgovori.** Odgovor, potvrda i poruka o neuspjehu idu samo na chat sa kog je pitanje stiglo, pa mentor nikad ne vidi Nemanjina pitanja ni odgovore njemu. Poruku o grešci uvijek dobija Nemanja, sa oznakom chata (`mentor` ili `nemanja`) i bez teksta pitanja.
+
+### Pitanja mentora
+
+Podešavanje je `PITANJA_MENTORA` u `wrangler.toml`, isto kao `PROBNI_REZIM`. Mentorova pitanja rade samo kad je tačno `ukljucena`, a probni režim isključen. Sve drugo, i kad podešavanje fali, znači isključeno: mentorove poruke se tada tiho preskaču, pa i one bez teksta, i ništa se ne šalje ni Nemanji. Vrijednost u `wrangler.toml` je `iskljucena`, a uključuje se u #62.
+
+- **Limit.** Mentor ima 15 pitanja po kalendarskom danu, po zoni `Europe/Belgrade`. Broje se uspješni odgovori, po danu kad su stigli, i pokretanje koje je u toku. Nova poruka ide u pokretanje koje čeka, pa se poruke spojene u jedno pitanje broje kao jedno, a poruka koja se spoji sa onima koje već čekaju ne troši novo pitanje. Odbijena i neuspjela pitanja, istekao rok, pokretanje koje GitHub nije prihvatio i poruke bez teksta se ne broje.
+- **Potrošen limit.** Nova poruka dobija "Za danas je potrošen dnevni broj pitanja. Možeš ponovo sutra." i ne ulazi u red, pa ni u bazu. Broj se obnavlja u ponoć po lokalnom vremenu. Nemanjina pitanja nemaju limit i ne troše mentorov.
+- **Persiranje.** Upisuje se u D1 po chatu iz polja `persiranje` u `/actions/odgovor`, samo za `da` ili `ne`. Uz `da` stalne poruke na tom chatu prelaze na "vi": "pokušajte ponovo za nekoliko minuta", "Možete ponovo sutra." i "Napišite ga bez toga.", a uz `ne` se vraćaju na "ti". Važi već za poruku iz istog javljanja. Javljanje sa starom oznakom ili poslije roka ne upisuje ništa.
+- **Uvodna poruka.** Na prvi cron poslije uključivanja, dok je probni režim isključen, mentor jednom dobija: "Od danas možeš i da me pitaš šta je Nemanja radio, npr. „Šta je Nemanja radio juče?” ili „Kako je uradio pitanja o radu?”. Odgovaram iz izvještaja, bilješki i GitHub-a za posljednjih 30 dana, obično za minut-dva. Dnevno možeš da postaviš do 15 pitanja." Worker u D1 upiše da je poslata, prije slanja, pa je od dva istovremena cron-a šalje samo jedan. Ako slanje ne uspije, upis se briše, a pokušava se sljedećim cron-om.
 
 ## Ulazi
 
 ### `POST /telegram`
 
-Traži zaglavlje `X-Telegram-Bot-Api-Secret-Token`. Sa Nemanjinog chata prima poruke "završio" i "odloži", bez obzira na velika slova, razmake oko riječi i kvačicu, pritisak na dugme sa pitanja (`callback_query`) i pitanja o radu: svaku drugu poruku (vidi "Pitanja o radu"). Poruke sa ostalih chatova se tiho preskaču. Uvijek vraća 200, da Telegram ne ponavlja zahtjev.
+Traži zaglavlje `X-Telegram-Bot-Api-Secret-Token`. Sa Nemanjinog chata prima poruke "završio" i "odloži", bez obzira na velika slova, razmake oko riječi i kvačicu, pritisak na dugme sa pitanja (`callback_query`) i pitanja o radu: svaku drugu poruku (vidi "Pitanja o radu"). Sa mentorovog chata prima samo pitanja o radu, i to dok su pitanja mentora uključena. Poruke sa ostalih chatova se tiho preskaču. Uvijek vraća 200, da Telegram ne ponavlja zahtjev.
 
 ### `POST /actions/rezultat`
 
@@ -237,7 +247,7 @@ Traži isti ključ kao `/actions/rezultat`. Poziva ga `pitanje-o-radu.yml`, koji
 | `odbijeno` | "Ovo pitanje ne mogu da obradim jer sadrži nešto što liči na lozinku, ključ ili putanju. Napiši ga bez toga." |
 | `neuspjeh` | "Trenutno ne mogu da odgovorim, pokušaj ponovo za nekoliko minuta." |
 
-`persiranje` je obavezno: `da`, `ne` ili `bez_promjene`. Za sad se samo prima, a upis i stalne poruke na "vi" su u #60. `tekst` se uz `odbijeno` i `neuspjeh` ne čita. Poruku o grešci Nemanji za `neuspjeh` šalje workflow, preko `/actions/vlasnik`.
+`persiranje` je obavezno: `da`, `ne` ili `bez_promjene`. `da` i `ne` se upisuju za chat pokretanja (vidi "Pitanja mentora"), pa stalne poruke iz tabele tada idu na "vi" ili "ti". Uspješan `odgovor` se broji u mentorov dnevni limit. `tekst` se uz `odbijeno` i `neuspjeh` ne čita. Poruku o grešci Nemanji za `neuspjeh` šalje workflow, preko `/actions/vlasnik`.
 
 Javljanje sa nepoznatom ili starom oznakom, dvostruko javljanje i javljanje poslije roka ništa ne rade. Worker ne ponavlja slanje odgovora.
 

@@ -6,6 +6,8 @@ compatibility_date = "2026-11-01"
 # prepisuje preko one na Cloudflare-u, pa se isključuje samo ovdje, u #32.
 [vars]
 PROBNI_REZIM = "iskljucen"
+# Sve što nije "ukljucena" znači da su pitanja mentora isključena. Uključuju se u #62, isto ovdje.
+PITANJA_MENTORA = "iskljucena"
 
 # Po UTC-u. Lokalno vrijeme Worker računa sam, pa 23:40 i 1:00 ne zavise od ljetnjeg i zimskog vremena.
 [triggers]
