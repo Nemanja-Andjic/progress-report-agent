@@ -18,11 +18,14 @@ import {
 import {
   greskaZaNemanju,
   istekao,
-  NEUSPJEH,
+  limitPotrosen,
+  novoPersiranje,
   porukaZaChat,
   RAZMISLJAM,
   SAMO_TEKST,
   spojenoPitanje,
+  stalnaPoruka,
+  UVODNA_PORUKA,
   vrstaPoruke,
   type Chat,
   type IshodOdgovora,
@@ -53,6 +56,7 @@ interface Env {
   KLJUC_ACTIONS?: string;
   KLJUC_HOOKA?: string;
   PROBNI_REZIM?: string;
+  PITANJA_MENTORA?: string;
 }
 
 interface UcitanDan {
@@ -309,8 +313,53 @@ async function obrisiPokretanje(db: D1Database, oznaka: string): Promise<Chat | 
   return results[0]?.chat ?? null;
 }
 
+// Mentorova pitanja rade samo uz izričito "ukljucena" i isključen probni režim. Inače bi u probnom
+// režimu i odgovori mentoru išli na njegov chat, mimo probe.
+function pitanjaMentora(env: Env): boolean {
+  return env.PITANJA_MENTORA === "ukljucena" && env.PROBNI_REZIM === "iskljucen";
+}
+
+async function persiran(db: D1Database, chat: Chat): Promise<boolean> {
+  const red = await db.prepare("SELECT persiran FROM persiranje WHERE chat = ?1").bind(chat).first<{ persiran: number }>();
+  return Boolean(red?.persiran);
+}
+
+async function upisiPersiranje(db: D1Database, chat: Chat, vrijednost: boolean): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO persiranje (chat, persiran) VALUES (?1, ?2) ON CONFLICT (chat) DO UPDATE SET persiran = excluded.persiran",
+    )
+    .bind(chat, Number(vrijednost))
+    .run();
+}
+
+// Stariji dani se brišu odmah, jer limit gleda samo današnji.
+async function zabiljeziOdgovor(db: D1Database, chat: Chat, datum: string): Promise<void> {
+  await db.batch([
+    db.prepare("DELETE FROM odgovori_po_danu WHERE datum < ?1").bind(datum),
+    db
+      .prepare(
+        `INSERT INTO odgovori_po_danu (chat, datum, broj) VALUES (?1, ?2, 1)
+         ON CONFLICT (chat, datum) DO UPDATE SET broj = broj + 1`,
+      )
+      .bind(chat, datum),
+  ]);
+}
+
+async function potrosenLimit(db: D1Database, chat: Chat, datum: string): Promise<boolean> {
+  const stanje = await db
+    .prepare(
+      `SELECT
+         (SELECT COALESCE(SUM(broj), 0) FROM odgovori_po_danu WHERE chat = ?1 AND datum = ?2) AS uspjesnih,
+         EXISTS (SELECT 1 FROM pitanja_o_radu WHERE chat = ?1 AND oznaka IS NOT NULL) AS u_toku`,
+    )
+    .bind(chat, datum)
+    .first<{ uspjesnih: number; u_toku: number }>();
+  return limitPotrosen(chat, stanje?.uspjesnih ?? 0, Boolean(stanje?.u_toku));
+}
+
 async function javiNeuspjeh(env: Env, chat: Chat, razlog: "rok" | "nije_pokrenuto"): Promise<void> {
-  await posaljiPoruku(env, idChata(env, chat), NEUSPJEH);
+  await posaljiPoruku(env, idChata(env, chat), stalnaPoruka("neuspjeh", await persiran(env.DB, chat)));
   await posaljiPoruku(env, env.TELEGRAM_CHAT_NEMANJA, greskaZaNemanju(chat, razlog));
 }
 
@@ -351,9 +400,13 @@ async function pokreniSljedece(env: Env, chat: Chat): Promise<void> {
 }
 
 // Pitanje o radu nikad ne dira stanje radnog dana i nije aktivnost (ADR 0007). Potvrdu dobija i
-// pitanje koje čeka u redu.
+// pitanje koje čeka u redu. Pitanje preko limita ne ulazi u red, pa ni u bazu.
 async function primiPitanje(env: Env, chat: Chat, tekst: string): Promise<void> {
   await zavrsiIsteklo(env, chat);
+  if (await potrosenLimit(env.DB, chat, lokalnoVrijeme(new Date()).datum)) {
+    await posaljiPoruku(env, idChata(env, chat), stalnaPoruka("limit", await persiran(env.DB, chat)));
+    return;
+  }
   await env.DB.prepare("INSERT INTO pitanja_o_radu (chat, tekst) VALUES (?1, ?2)").bind(chat, tekst).run();
   await posaljiPoruku(env, idChata(env, chat), RAZMISLJAM);
   await pokreniSljedece(env, chat);
@@ -383,6 +436,15 @@ async function pritisnutoDugme(dugme: any, env: Env): Promise<Response> {
   return new Response();
 }
 
+// Sa mentorovog chata komandi nema, pa je svaka poruka sa tekstom pitanje o radu (ADR 0007).
+async function porukaMentora(env: Env, tekst: unknown): Promise<void> {
+  if (typeof tekst !== "string" || !tekst.trim()) {
+    await posaljiPoruku(env, env.TELEGRAM_CHAT_MENTOR, SAMO_TEKST);
+    return;
+  }
+  await primiPitanje(env, "mentor", tekst.trim());
+}
+
 async function telegram(zahtjev: Request, env: Env): Promise<Response> {
   const tajna = zahtjev.headers.get("X-Telegram-Bot-Api-Secret-Token");
   if (!(await kljucVazi(tajna, env.TELEGRAM_WEBHOOK_TAJNA))) return new Response(null, { status: 401 });
@@ -391,6 +453,10 @@ async function telegram(zahtjev: Request, env: Env): Promise<Response> {
   const izmjena = await zahtjev.json<any>().catch(() => null);
   if (izmjena?.callback_query) return pritisnutoDugme(izmjena.callback_query, env);
   const poruka = izmjena?.message;
+  if (env.TELEGRAM_CHAT_MENTOR && String(poruka?.chat?.id) === env.TELEGRAM_CHAT_MENTOR) {
+    if (pitanjaMentora(env)) await porukaMentora(env, poruka?.text);
+    return new Response();
+  }
   if (!env.TELEGRAM_CHAT_NEMANJA || String(poruka?.chat?.id) !== env.TELEGRAM_CHAT_NEMANJA) return new Response();
   const vrsta = vrstaPoruke(poruka?.text);
   if (vrsta.vrsta === "bez_teksta") {
@@ -485,15 +551,20 @@ interface JavljanjeOdgovora {
   oznaka: string;
   ishod: IshodOdgovora;
   tekst: string;
+  persiranje: Persiranje;
 }
 
-// Tekst se gleda samo uz odgovor, jer ga odbijeno pitanje i neuspjeh nemaju. Persiranje se za sad
-// samo prima i provjerava, a upis i stalne poruke na "vi" su u #60.
+// Tekst se gleda samo uz odgovor, jer ga odbijeno pitanje i neuspjeh nemaju.
 function javljanjeOdgovora(telo: any): JavljanjeOdgovora | null {
   if (typeof telo?.oznaka !== "string" || !telo.oznaka) return null;
   if (!ISHODI_ODGOVORA.includes(telo.ishod) || !PERSIRANJA.includes(telo.persiranje)) return null;
   if (telo.ishod === "odgovor" && !ispravanTekst(telo.tekst)) return null;
-  return { oznaka: telo.oznaka, ishod: telo.ishod, tekst: telo.ishod === "odgovor" ? telo.tekst : "" };
+  return {
+    oznaka: telo.oznaka,
+    ishod: telo.ishod,
+    tekst: telo.ishod === "odgovor" ? telo.tekst : "",
+    persiranje: telo.persiranje,
+  };
 }
 
 // Javljanje sa nepoznatom ili starom oznakom, dvostruko i zakasnilo ništa ne rade i vraćaju 200.
@@ -511,7 +582,14 @@ async function odgovor(zahtjev: Request, env: Env): Promise<Response> {
   const chat = await obrisiPokretanje(env.DB, javljanje.oznaka);
   if (!chat) return new Response();
 
-  await posaljiPoruku(env, idChata(env, chat), porukaZaChat(javljanje.ishod, javljanje.tekst));
+  // Persiranje se upiše prije slanja, pa i stalna poruka iz ovog javljanja već ide na "vi".
+  const novo = novoPersiranje(javljanje.persiranje);
+  if (novo !== null) await upisiPersiranje(env.DB, chat, novo);
+  // Broji se samo uspješan odgovor, po danu kad je stigao.
+  if (javljanje.ishod === "odgovor") await zabiljeziOdgovor(env.DB, chat, lokalnoVrijeme(new Date()).datum);
+
+  const poruka = porukaZaChat(javljanje.ishod, javljanje.tekst, await persiran(env.DB, chat));
+  await posaljiPoruku(env, idChata(env, chat), poruka);
   await pokreniSljedece(env, chat);
   return new Response();
 }
@@ -564,6 +642,20 @@ async function jutarnjaProvjera(env: Env): Promise<void> {
   }
 }
 
+// Uvodna poruka ide mentoru jednom, na prvi cron poslije uključivanja pitanja mentora. Upis ide prije
+// slanja, pa od dva istovremena cron-a šalje samo jedan. Ako slanje ne uspije, upis se briše, pa
+// pokušava sljedeći cron.
+async function uvodnaPoruka(env: Env): Promise<void> {
+  if (!pitanjaMentora(env)) return;
+  const upis = await env.DB.prepare("INSERT OR IGNORE INTO uvodne_poruke (chat, poslata) VALUES ('mentor', ?1)")
+    .bind(Date.now())
+    .run();
+  if (upis.meta.changes !== 1) return;
+  if (!(await posaljiPoruku(env, env.TELEGRAM_CHAT_MENTOR, UVODNA_PORUKA))) {
+    await env.DB.prepare("DELETE FROM uvodne_poruke WHERE chat = 'mentor'").run();
+  }
+}
+
 // Pored današnjeg gleda i ranije dane koji još čekaju, npr. pisanje pokrenuto prije ponoći.
 // Do 2:00 gleda i jučerašnji dan, zbog samostalnog slanja do 1:00 i pokušaja u 1:00 (ADR 0008).
 async function cron(env: Env): Promise<void> {
@@ -599,5 +691,6 @@ export default {
     // Greška jutarnje provjere, npr. u bazi, ne smije da obori pravila dana, a pokušava sljedeći cron.
     await jutarnjaProvjera(env).catch(() => console.error("Jutarnja provjera nije pokrenuta: greška u Workeru."));
     await redoviPitanja(env).catch(() => console.error("Red pitanja o radu nije obrađen: greška u Workeru."));
+    await uvodnaPoruka(env).catch(() => console.error("Uvodna poruka mentoru nije poslata: greška u Workeru."));
   },
 } satisfies ExportedHandler<Env>;
