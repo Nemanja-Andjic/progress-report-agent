@@ -34,6 +34,8 @@ let poruke: { chat: number; tekst: string; bezZvuka?: true }[];
 let pokretanja: { url: string; token: string | null; telo: unknown }[];
 // Jutarnja provjera ide odvojeno, jer je cron pokreće svaki dan, pa i u testovima drugih pravila.
 let jutarnjaPokretanja: { url: string; token: string | null; telo: unknown }[];
+// Pitanja o radu idu odvojeno, jer svaka poruka sa Nemanjinog chata osim komandi pokreće pitanje.
+let pokretanjaPitanja: { url: string; token: string | null; telo: unknown }[];
 let telegramPada: boolean;
 let telegramNeOdgovara: boolean;
 let pozivaTelegrama: number;
@@ -70,7 +72,9 @@ async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promi
   if (adresa.hostname === "api.github.com") {
     if (githubPada) return new Response("{}", { status: 500 });
     const pokretanje = { url: zahtjev.url, token: zahtjev.headers.get("Authorization"), telo: await zahtjev.json() };
-    (pokretanje.url.includes("jutarnja-provjera.yml") ? jutarnjaPokretanja : pokretanja).push(pokretanje);
+    if (pokretanje.url.includes("jutarnja-provjera.yml")) jutarnjaPokretanja.push(pokretanje);
+    else if (pokretanje.url.includes("pitanje-o-radu.yml")) pokretanjaPitanja.push(pokretanje);
+    else pokretanja.push(pokretanje);
     return new Response(null, { status: 204 });
   }
   throw new Error(`Neočekivan poziv: ${adresa.hostname}`);
@@ -156,6 +160,7 @@ beforeEach(async () => {
   poruke = [];
   pokretanja = [];
   jutarnjaPokretanja = [];
+  pokretanjaPitanja = [];
   telegramPada = false;
   telegramNeOdgovara = false;
   pozivaTelegrama = 0;
@@ -1741,10 +1746,11 @@ describe('"odloži"', () => {
     expect(pokretanja).toEqual([]);
   });
 
-  it.each(["odloži malo", "odlo"])("ne prima %j", async (tekst) => {
+  it.each(["odloži malo", "odlo"])("ne prima %j, nego je to pitanje o radu", async (tekst) => {
     await odlozi(tekst);
 
-    expect(poruke).toEqual([]);
+    expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: "Razmišljam, odgovor stiže za minut-dva." }]);
+    expect(pokretanjaPitanja).toHaveLength(1);
   });
 
   it.each([CHAT_TUDJI, CHAT_MENTOR])("sa tuđeg chata (%i) se tiho preskače", async (chat) => {
@@ -2091,3 +2097,428 @@ describe("jutarnja provjera", () => {
   });
 });
 
+
+describe("pitanja o radu", () => {
+  const RAZMISLJAM = "Razmišljam, odgovor stiže za minut-dva.";
+  const SAMO_TEKST = "Mogu da odgovorim samo na pitanja napisana tekstom.";
+  const ODBIJENO =
+    "Ovo pitanje ne mogu da obradim jer sadrži nešto što liči na lozinku, ključ ili putanju. Napiši ga bez toga.";
+  const NEUSPJEH = "Trenutno ne mogu da odgovorim, pokušaj ponovo za nekoliko minuta.";
+  const GRESKA_ROK = 'Pitanje o radu sa chata „nemanja" nije dobilo odgovor: odgovor nije stigao u roku od 5 minuta.';
+  const GRESKA_GITHUB = 'Pitanje o radu sa chata „nemanja" nije dobilo odgovor: GitHub nije pokrenuo pitanje-o-radu.yml.';
+
+  const pitaj = (tekst: string, chat = CHAT_NEMANJA, env?: Partial<Env>) => pozovi(telegramZahtjev(tekst, chat), env);
+  const ulazi = (indeks = -1) =>
+    (pokretanjaPitanja.at(indeks)?.telo as { inputs: { chat: string; oznaka: string; pitanje: string } }).inputs;
+  const pitanja = () => pokretanjaPitanja.map((pokretanje) => (pokretanje.telo as { inputs: { pitanje: string } }).inputs.pitanje);
+  const tekstovi = () => poruke.map((poruka) => poruka.tekst);
+  const minuta = (broj: number) => vi.setSystemTime(new Date(PODNE.getTime() + broj * 60_000));
+  // Izuzetak od pravila da testovi ne gledaju u bazu: brisanje teksta se spolja ne vidi.
+  const tekstoviUBazi = () =>
+    bazniEnv.DB.prepare("SELECT tekst FROM pitanja_o_radu")
+      .all<{ tekst: string }>()
+      .then(({ results }) => results.map((red) => red.tekst));
+
+  function odgovorZahtjev(telo: unknown, kljuc: string | null = KLJUC_ACTIONS, metoda = "POST"): Request {
+    const zaglavlja: Record<string, string> = kljuc ? { Authorization: `Bearer ${kljuc}` } : {};
+    return new Request("https://worker.test/actions/odgovor", {
+      method: metoda,
+      headers: zaglavlja,
+      body: typeof telo === "string" ? telo : JSON.stringify(telo),
+    });
+  }
+  const javi = (ishod: string, tekst = "", oznaka = ulazi().oznaka, persiranje = "bez_promjene") =>
+    pozovi(odgovorZahtjev({ oznaka, ishod, tekst, persiranje }));
+
+  function porukaBezTeksta(dodatak: object, chat = CHAT_NEMANJA): Request {
+    return new Request("https://worker.test/telegram", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": TAJNA_WEBHOOKA },
+      body: JSON.stringify({ update_id: 3, message: { message_id: 2, chat: { id: chat }, ...dodatak } }),
+    });
+  }
+
+  describe("prijem", () => {
+    it("poruka sa Nemanjinog chata dobija potvrdu i pokreće pitanje-o-radu.yml na grani main", async () => {
+      expect((await pitaj("Šta sam radio juče?")).status).toBe(200);
+
+      expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: RAZMISLJAM }]);
+      expect(pokretanjaPitanja).toHaveLength(1);
+      expect(pokretanjaPitanja[0].url).toBe(
+        "https://api.github.com/repos/Nemanja-Andjic/progress-report-izvjestaji/actions/workflows/pitanje-o-radu.yml/dispatches",
+      );
+      expect(pokretanjaPitanja[0].token).toBe(`Bearer ${TOKEN_GITHUBA}`);
+      expect(pokretanjaPitanja[0].telo).toEqual({
+        ref: "main",
+        inputs: { chat: "nemanja", oznaka: expect.any(String), pitanje: "Šta sam radio juče?" },
+      });
+      expect(ulazi().oznaka).not.toBe("");
+    });
+
+    it("komande ostaju komande i ne postaju pitanje", async () => {
+      await pitaj("završio");
+      await pitaj(" Odloži ");
+
+      expect(pokretanjaPitanja).toEqual([]);
+      expect(tekstovi()).not.toContain(RAZMISLJAM);
+    });
+
+    it.each([
+      ["mentorovog", CHAT_MENTOR],
+      ["tuđeg", CHAT_TUDJI],
+    ])("poruka sa %s chata se tiho preskače", async (_ime, chat) => {
+      expect((await pitaj("Šta je Nemanja radio?", chat)).status).toBe(200);
+      expect((await pozovi(porukaBezTeksta({ sticker: { file_id: "x" } }, chat))).status).toBe(200);
+
+      expect(poruke).toEqual([]);
+      expect(pokretanjaPitanja).toEqual([]);
+    });
+
+    it.each([
+      ["slika", { photo: [{ file_id: "x" }], caption: "Šta je ovo?" }],
+      ["glasovna poruka", { voice: { file_id: "x" } }],
+      ["stiker", { sticker: { file_id: "x" } }],
+      ["prazan tekst", { text: "  " }],
+    ])("%s dobija poruku da odgovara samo na tekst i ne pokreće ništa", async (_ime, dodatak) => {
+      expect((await pozovi(porukaBezTeksta(dodatak))).status).toBe(200);
+
+      expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: SAMO_TEKST }]);
+      expect(pokretanjaPitanja).toEqual([]);
+      expect(await tekstoviUBazi()).toEqual([]);
+    });
+
+    it("nije aktivnost i ne pravi radni dan", async () => {
+      await pitaj("Šta sam radio?");
+      await javi("odgovor", "Odgovor.");
+
+      expect(await posljednjaAktivnost()).toBeNull();
+      await cronU("2030-05-15T14:00:00Z");
+      expect(provjere()).toEqual([]);
+    });
+
+    it("radi na zatvoren dan, a dan ostaje zatvoren", async () => {
+      await zavrsio();
+      await gotovo("Izvještaj");
+      poruke = [];
+
+      await pitaj("Šta sam radio danas?");
+      await javi("odgovor", "Odgovor.");
+      await zavrsio();
+
+      expect(tekstovi()).toEqual([RAZMISLJAM, "Odgovor.", "Izvještaj za danas je već poslat."]);
+      expect(pisanja()).toHaveLength(1);
+    });
+
+    it("radi dok pisanje teče, a pisanje teče dalje", async () => {
+      await zavrsio();
+      poruke = [];
+
+      await pitaj("Šta sam radio danas?");
+      await javi("odgovor", "Odgovor.");
+      await gotovo("Izvještaj");
+
+      expect(tekstovi()).toEqual([RAZMISLJAM, "Odgovor.", "(proba)\n\nIzvještaj"]);
+      expect(pisanja()).toHaveLength(1);
+    });
+
+    it("radi i od 1:00 do 5:00", async () => {
+      vi.setSystemTime(new Date("2030-05-16T00:30:00Z"));
+      await pitaj("Šta sam radio sinoć?");
+
+      expect(tekstovi()).toEqual([RAZMISLJAM]);
+      expect(pokretanjaPitanja).toHaveLength(1);
+    });
+  });
+
+  describe("javljanje iz Actions", () => {
+    it("odgovor ide na chat pokretanja, sa zvukom, a tekst pitanja se briše iz baze", async () => {
+      await pitaj("Šta sam radio juče?");
+      poruke = [];
+
+      expect((await javi("odgovor", "Juče je radio na Workeru.")).status).toBe(200);
+
+      expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: "Juče je radio na Workeru." }]);
+      expect(porukeNaChat(CHAT_MENTOR)).toEqual([]);
+      expect(await tekstoviUBazi()).toEqual([]);
+    });
+
+    it.each([
+      ["odbijeno", ODBIJENO],
+      ["neuspjeh", NEUSPJEH],
+    ])("%s šalje stalnu poruku, a tekst iz zahtjeva ne ide nigdje", async (ishod, poruka) => {
+      await pitaj("Pitanje");
+      poruke = [];
+
+      expect((await javi(ishod, "Nešto iz workflow-a")).status).toBe(200);
+
+      expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: poruka }]);
+      expect(await tekstoviUBazi()).toEqual([]);
+    });
+
+    it.each(["da", "ne", "bez_promjene"])("prima persiranje %j", async (persiranje) => {
+      await pitaj("Pitanje");
+
+      expect((await javi("odgovor", "Odgovor.", undefined, persiranje)).status).toBe(200);
+      expect(tekstovi().at(-1)).toBe("Odgovor.");
+    });
+
+    it("nepoznata oznaka ništa ne radi i vraća 200", async () => {
+      await pitaj("Pitanje");
+      poruke = [];
+
+      expect((await javi("odgovor", "Odgovor.", "nepoznata")).status).toBe(200);
+      expect(poruke).toEqual([]);
+
+      await javi("odgovor", "Pravi odgovor.");
+      expect(tekstovi()).toEqual(["Pravi odgovor."]);
+    });
+
+    it("dvostruko javljanje šalje jednu poruku", async () => {
+      await pitaj("Pitanje");
+      poruke = [];
+
+      expect((await javi("odgovor", "Odgovor.")).status).toBe(200);
+      expect((await javi("odgovor", "Odgovor.")).status).toBe(200);
+      expect((await javi("neuspjeh")).status).toBe(200);
+
+      expect(tekstovi()).toEqual(["Odgovor."]);
+    });
+
+    it("javljanja u isto vrijeme šalju jednu poruku", async () => {
+      await pitaj("Pitanje");
+      poruke = [];
+
+      await Promise.all([javi("odgovor", "Odgovor."), javi("odgovor", "Odgovor."), javi("neuspjeh")]);
+
+      expect(poruke).toHaveLength(1);
+    });
+
+    it("stara oznaka ne odgovara na novo pitanje", async () => {
+      await pitaj("Prvo");
+      const stara = ulazi().oznaka;
+      await javi("odgovor", "Prvi odgovor.");
+      await pitaj("Drugo");
+      poruke = [];
+
+      expect((await javi("odgovor", "Kasni.", stara)).status).toBe(200);
+      expect(poruke).toEqual([]);
+      expect(ulazi().oznaka).not.toBe(stara);
+    });
+
+    it("javljanje poslije roka ništa ne šalje i vraća 200", async () => {
+      await pitaj("Pitanje");
+      poruke = [];
+      minuta(5);
+
+      expect((await javi("odgovor", "Kasni.")).status).toBe(200);
+      expect(poruke).toEqual([]);
+    });
+
+    it("javljanje malo prije roka se šalje", async () => {
+      await pitaj("Pitanje");
+      poruke = [];
+      vi.setSystemTime(new Date(PODNE.getTime() + 5 * 60_000 - 1));
+
+      await javi("odgovor", "Na vrijeme.");
+      expect(tekstovi()).toEqual(["Na vrijeme."]);
+    });
+
+    it.each([
+      ["bez ključa", null],
+      ["sa pogrešnim ključem", "pogresan"],
+      ["sa ključem hooka", KLJUC_HOOKA],
+      ["sa tajnom webhook-a", TAJNA_WEBHOOKA],
+    ])("odbija zahtjev %s i ne šalje ništa", async (_ime, kljuc) => {
+      await pitaj("Pitanje");
+      poruke = [];
+
+      const odgovor = await pozovi(
+        odgovorZahtjev({ oznaka: ulazi().oznaka, ishod: "odgovor", tekst: "Odgovor.", persiranje: "ne" }, kljuc),
+      );
+
+      expect(odgovor.status).toBe(401);
+      expect(poruke).toEqual([]);
+      await javi("odgovor", "Pravi odgovor.");
+      expect(tekstovi()).toEqual(["Pravi odgovor."]);
+    });
+
+    it("bez podešenog ključa na Workeru odbija svaki zahtjev", async () => {
+      await pitaj("Pitanje");
+      const telo = { oznaka: ulazi().oznaka, ishod: "odgovor", tekst: "Odgovor.", persiranje: "ne" };
+
+      const odgovor = await pozovi(odgovorZahtjev(telo, "undefined"), { ...ENV, KLJUC_ACTIONS: undefined });
+
+      expect(odgovor.status).toBe(401);
+    });
+
+    it.each([
+      ["koje nije JSON", () => "nije json"],
+      ["koje je null", () => "null"],
+      ["bez oznake", () => ({ ishod: "odgovor", tekst: "Odgovor.", persiranje: "ne" })],
+      ["sa praznom oznakom", () => ({ oznaka: "", ishod: "odgovor", tekst: "Odgovor.", persiranje: "ne" })],
+      ["sa nepoznatim ishodom", () => ({ oznaka: ulazi().oznaka, ishod: "gotovo", tekst: "Odgovor.", persiranje: "ne" })],
+      ["sa odgovorom bez teksta", () => ({ oznaka: ulazi().oznaka, ishod: "odgovor", persiranje: "ne" })],
+      ["sa praznim odgovorom", () => ({ oznaka: ulazi().oznaka, ishod: "odgovor", tekst: " ", persiranje: "ne" })],
+      ["sa odgovorom dužim od 4000 znakova", () => ({ oznaka: ulazi().oznaka, ishod: "odgovor", tekst: "a".repeat(4001), persiranje: "ne" })],
+      ["bez persiranja", () => ({ oznaka: ulazi().oznaka, ishod: "odgovor", tekst: "Odgovor." })],
+      ["sa nepoznatim persiranjem", () => ({ oznaka: ulazi().oznaka, ishod: "odgovor", tekst: "Odgovor.", persiranje: "vi" })],
+    ])("odbija tijelo %s, a pitanje i dalje čeka odgovor", async (_ime, telo) => {
+      await pitaj("Pitanje");
+      poruke = [];
+
+      expect((await pozovi(odgovorZahtjev(telo()))).status).toBe(400);
+      expect(poruke).toEqual([]);
+
+      await javi("odgovor", "Pravi odgovor.");
+      expect(tekstovi()).toEqual(["Pravi odgovor."]);
+    });
+
+    it("radi samo na POST", async () => {
+      expect((await pozovi(odgovorZahtjev(undefined, KLJUC_ACTIONS, "GET"))).status).toBe(404);
+    });
+  });
+
+  describe("red", () => {
+    it("pitanje koje stigne dok prethodno traje dobija potvrdu i čeka", async () => {
+      await pitaj("Prvo");
+      await pitaj("Drugo");
+
+      expect(tekstovi()).toEqual([RAZMISLJAM, RAZMISLJAM]);
+      expect(pitanja()).toEqual(["Prvo"]);
+    });
+
+    it("poruke nakupljene u redu idu zajedno, kao jedno pitanje, redom kojim su stigle", async () => {
+      await pitaj("Prvo");
+      await pitaj("Drugo");
+      await pitaj("Treće");
+      await pitaj("Četvrto");
+
+      await javi("odgovor", "Odgovor na prvo.");
+
+      expect(pitanja()).toEqual(["Prvo", "Drugo\nTreće\nČetvrto"]);
+      expect(await tekstoviUBazi()).toEqual(["Drugo", "Treće", "Četvrto"]);
+
+      await javi("odgovor", "Odgovor na ostalo.");
+      expect(pokretanjaPitanja).toHaveLength(2);
+      expect(await tekstoviUBazi()).toEqual([]);
+    });
+
+    it.each(["odbijeno", "neuspjeh"])("poslije ishoda %j red ide dalje", async (ishod) => {
+      await pitaj("Prvo");
+      await pitaj("Drugo");
+
+      await javi(ishod);
+
+      expect(pitanja()).toEqual(["Prvo", "Drugo"]);
+    });
+
+    // Koliko poruka uđe u prvo pokretanje zavisi od redoslijeda upisa, ali svaka ide tačno jednom.
+    it("pitanja u isto vrijeme pokreću jedno pokretanje, a svaka poruka ide tačno jednom", async () => {
+      await Promise.all([pitaj("A"), pitaj("B"), pitaj("C")]);
+
+      expect(tekstovi()).toEqual([RAZMISLJAM, RAZMISLJAM, RAZMISLJAM]);
+      expect(pokretanjaPitanja).toHaveLength(1);
+
+      await javi("odgovor", "Odgovor.");
+      if (pokretanjaPitanja.length === 2) await javi("odgovor", "Odgovor.");
+      expect(pitanja().join("\n").split("\n").sort()).toEqual(["A", "B", "C"]);
+      expect(await tekstoviUBazi()).toEqual([]);
+    });
+
+    it("cron ne pokreće ništa dok pokretanje traje", async () => {
+      await pitaj("Prvo");
+      await pitaj("Drugo");
+
+      await cronU("2030-05-15T10:04:00Z");
+
+      expect(pitanja()).toEqual(["Prvo"]);
+    });
+  });
+
+  describe("rok", () => {
+    it("bez odgovora 5 minuta, cron javlja neuspjeh chatu i grešku Nemanji bez teksta pitanja", async () => {
+      await pitaj("Tajno pitanje o radu");
+      poruke = [];
+
+      await cronU("2030-05-15T10:04:55Z");
+      expect(poruke).toEqual([]);
+
+      await cronU("2030-05-15T10:05:00Z");
+      expect(tekstovi()).toEqual([NEUSPJEH, GRESKA_ROK]);
+      expect(tekstovi().some((tekst) => tekst.includes("Tajno"))).toBe(false);
+      expect(await tekstoviUBazi()).toEqual([]);
+
+      await cronU("2030-05-15T10:10:00Z");
+      expect(poruke).toHaveLength(2);
+    });
+
+    it("poslije roka red ide dalje", async () => {
+      await pitaj("Prvo");
+      await pitaj("Drugo");
+
+      await cronU("2030-05-15T10:05:00Z");
+
+      expect(pitanja()).toEqual(["Prvo", "Drugo"]);
+      vi.setSystemTime(new Date("2030-05-15T10:06:00Z"));
+      await javi("odgovor", "Odgovor na drugo.");
+      expect(tekstovi().at(-1)).toBe("Odgovor na drugo.");
+    });
+
+    it("prva sljedeća poruka na chatu proglasi istekao rok, pa pokreće novo pitanje", async () => {
+      await pitaj("Prvo");
+      poruke = [];
+      minuta(6);
+
+      await pitaj("Drugo");
+
+      expect(tekstovi()).toEqual([NEUSPJEH, GRESKA_ROK, RAZMISLJAM]);
+      expect(pitanja()).toEqual(["Prvo", "Drugo"]);
+    });
+
+    it("dva cron-a u isto vrijeme javljaju neuspjeh jednom", async () => {
+      await pitaj("Pitanje");
+      poruke = [];
+      vi.setSystemTime(new Date("2030-05-15T10:05:00Z"));
+
+      await Promise.all([cron(), cron()]);
+
+      expect(tekstovi()).toEqual([NEUSPJEH, GRESKA_ROK]);
+    });
+
+    it("kad GitHub ne pokrene workflow, neuspjeh se javi odmah i ništa ne ostaje u bazi", async () => {
+      githubPada = true;
+
+      await pitaj("Pitanje");
+
+      expect(tekstovi()).toEqual([RAZMISLJAM, NEUSPJEH, GRESKA_GITHUB]);
+      expect(await tekstoviUBazi()).toEqual([]);
+
+      githubPada = false;
+      await pitaj("Ponovo");
+      expect(pitanja()).toEqual(["Ponovo"]);
+    });
+
+    it("kad GitHub ne pokrene workflow za pitanje iz reda, red ide dalje", async () => {
+      await pitaj("Prvo");
+      await pitaj("Drugo");
+      githubPada = true;
+      poruke = [];
+
+      await javi("odgovor", "Odgovor na prvo.");
+
+      expect(tekstovi()).toEqual(["Odgovor na prvo.", NEUSPJEH, GRESKA_GITHUB]);
+      expect(await tekstoviUBazi()).toEqual([]);
+    });
+
+    it("kad GitHub ne odgovori, isto je neuspjeh", async () => {
+      vi.mocked(fetch).mockImplementation((ulaz, opcije) => {
+        if (new Request(ulaz, opcije).url.includes("pitanje-o-radu.yml")) return Promise.reject(new TypeError("Nema odgovora."));
+        return lazniSvijet(ulaz, opcije);
+      });
+
+      await pitaj("Pitanje");
+
+      expect(tekstovi()).toEqual([RAZMISLJAM, NEUSPJEH, GRESKA_GITHUB]);
+    });
+  });
+});
