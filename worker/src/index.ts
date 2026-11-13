@@ -42,6 +42,9 @@ const JUTARNJA_PROVJERA_MINUT_UTC = 6 * 60 + 30;
 const PODACI_DUGMETA = /^pitanje:(\d{4}-\d{2}-\d{2}):(jesam|nije)$/;
 const OBLIK_VREMENA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})$/;
 const ROK_POZIVA_MS = 10_000;
+// Koliko Worker čeka prije pokretanja poruke koja stigne na prazan red, da poruke poslate jedna za
+// drugom odu kao jedno pitanje.
+const CEKANJE_PRVE_PORUKE_MS = 10_000;
 const POKUSAJI_UPISA = 5;
 // Telegram prima do 4096 znakova, a oznaka probnog režima je dio poruke.
 const NAJDUZA_PORUKA = 4000;
@@ -376,16 +379,18 @@ async function zavrsiIsteklo(env: Env, chat: Chat): Promise<void> {
 
 // Ako za chat ništa nije u toku, sve poruke koje čekaju dobiju istu oznaku i idu kao jedno pitanje.
 // Uslov je u istom upisu, pa od dva istovremena poziva pokreće samo jedan. Poruka koja stigne
-// poslije upisa čeka sljedeće pokretanje.
-async function pokreniSljedece(env: Env, chat: Chat): Promise<void> {
+// poslije upisa čeka sljedeće pokretanje. Uz `stigloDo` pokreće samo ako je najstarija poruka koja
+// čeka stigla do tog trenutka, pa cron ne preduhitri čekanje na ostale poruke.
+async function pokreniSljedece(env: Env, chat: Chat, stigloDo = Number.MAX_SAFE_INTEGER): Promise<void> {
   for (;;) {
     const oznaka = crypto.randomUUID();
     const preuzeto = await env.DB.prepare(
       `UPDATE pitanja_o_radu SET oznaka = ?2, pokrenuto = ?3
        WHERE chat = ?1 AND oznaka IS NULL
-         AND NOT EXISTS (SELECT 1 FROM pitanja_o_radu WHERE chat = ?1 AND oznaka IS NOT NULL)`,
+         AND NOT EXISTS (SELECT 1 FROM pitanja_o_radu WHERE chat = ?1 AND oznaka IS NOT NULL)
+         AND (SELECT MIN(COALESCE(stiglo, 0)) FROM pitanja_o_radu WHERE chat = ?1 AND oznaka IS NULL) <= ?4`,
     )
-      .bind(chat, oznaka, Date.now())
+      .bind(chat, oznaka, Date.now(), stigloDo)
       .run();
     if (preuzeto.meta.changes === 0) return;
 
@@ -399,17 +404,34 @@ async function pokreniSljedece(env: Env, chat: Chat): Promise<void> {
   }
 }
 
+// Čeka da stignu i ostale poruke poslate jedna za drugom, pa ih pokreće kao jedno pitanje. Ako
+// čekanje ne uspije, ono što čeka pokreće sljedeći cron.
+async function pokreniPoslijeCekanja(env: Env, chat: Chat): Promise<void> {
+  try {
+    await scheduler.wait(CEKANJE_PRVE_PORUKE_MS);
+    await pokreniSljedece(env, chat);
+  } catch {
+    console.error("Pitanje o radu nije pokrenuto poslije čekanja: greška u Workeru.");
+  }
+}
+
 // Pitanje o radu nikad ne dira stanje radnog dana i nije aktivnost (ADR 0007). Potvrdu dobija i
 // pitanje koje čeka u redu. Pitanje preko limita ne ulazi u red, pa ni u bazu.
-async function primiPitanje(env: Env, chat: Chat, tekst: string): Promise<void> {
+// Red se gleda prije upisa, pa od poruka koje stignu na prazan red u isto vrijeme svaka vidi prazan
+// red i čeka, a pokreće samo jedna. Poruka koja zatekne red koji nije prazan ne čeka: pokrenuće je
+// čekanje poruke koja je već tu, javljanje ili cron.
+async function primiPitanje(env: Env, chat: Chat, tekst: string, kontekst: ExecutionContext): Promise<void> {
   await zavrsiIsteklo(env, chat);
   if (await potrosenLimit(env.DB, chat, lokalnoVrijeme(new Date()).datum)) {
     await posaljiPoruku(env, idChata(env, chat), stalnaPoruka("limit", await persiran(env.DB, chat)));
     return;
   }
-  await env.DB.prepare("INSERT INTO pitanja_o_radu (chat, tekst) VALUES (?1, ?2)").bind(chat, tekst).run();
+  const prazanRed = !(await env.DB.prepare("SELECT 1 FROM pitanja_o_radu WHERE chat = ?1 LIMIT 1").bind(chat).first());
+  await env.DB.prepare("INSERT INTO pitanja_o_radu (chat, tekst, stiglo) VALUES (?1, ?2, ?3)")
+    .bind(chat, tekst, Date.now())
+    .run();
   await posaljiPoruku(env, idChata(env, chat), RAZMISLJAM);
-  await pokreniSljedece(env, chat);
+  if (prazanRed) kontekst.waitUntil(pokreniPoslijeCekanja(env, chat));
 }
 
 // Dugme sa tuđeg chata ne dobija ni odgovor.
@@ -437,15 +459,15 @@ async function pritisnutoDugme(dugme: any, env: Env): Promise<Response> {
 }
 
 // Sa mentorovog chata komandi nema, pa je svaka poruka sa tekstom pitanje o radu (ADR 0007).
-async function porukaMentora(env: Env, tekst: unknown): Promise<void> {
+async function porukaMentora(env: Env, tekst: unknown, kontekst: ExecutionContext): Promise<void> {
   if (typeof tekst !== "string" || !tekst.trim()) {
     await posaljiPoruku(env, env.TELEGRAM_CHAT_MENTOR, SAMO_TEKST);
     return;
   }
-  await primiPitanje(env, "mentor", tekst.trim());
+  await primiPitanje(env, "mentor", tekst.trim(), kontekst);
 }
 
-async function telegram(zahtjev: Request, env: Env): Promise<Response> {
+async function telegram(zahtjev: Request, env: Env, kontekst: ExecutionContext): Promise<Response> {
   const tajna = zahtjev.headers.get("X-Telegram-Bot-Api-Secret-Token");
   if (!(await kljucVazi(tajna, env.TELEGRAM_WEBHOOK_TAJNA))) return new Response(null, { status: 401 });
 
@@ -454,7 +476,7 @@ async function telegram(zahtjev: Request, env: Env): Promise<Response> {
   if (izmjena?.callback_query) return pritisnutoDugme(izmjena.callback_query, env);
   const poruka = izmjena?.message;
   if (env.TELEGRAM_CHAT_MENTOR && String(poruka?.chat?.id) === env.TELEGRAM_CHAT_MENTOR) {
-    if (pitanjaMentora(env)) await porukaMentora(env, poruka?.text);
+    if (pitanjaMentora(env)) await porukaMentora(env, poruka?.text, kontekst);
     return new Response();
   }
   if (!env.TELEGRAM_CHAT_NEMANJA || String(poruka?.chat?.id) !== env.TELEGRAM_CHAT_NEMANJA) return new Response();
@@ -464,7 +486,7 @@ async function telegram(zahtjev: Request, env: Env): Promise<Response> {
     return new Response();
   }
   if (vrsta.vrsta === "pitanje") {
-    await primiPitanje(env, "nemanja", vrsta.tekst);
+    await primiPitanje(env, "nemanja", vrsta.tekst, kontekst);
     return new Response();
   }
 
@@ -594,12 +616,13 @@ async function odgovor(zahtjev: Request, env: Env): Promise<Response> {
   return new Response();
 }
 
-// Rok se provjerava na svaki cron, pa i kad na chatu nema novih poruka.
+// Rok se provjerava na svaki cron, pa i kad na chatu nema novih poruka. Cron pokreće i poruke čije
+// čekanje nije uspjelo, ali ne one koje su stigle prije manje od CEKANJE_PRVE_PORUKE_MS.
 async function redoviPitanja(env: Env): Promise<void> {
   const { results } = await env.DB.prepare("SELECT DISTINCT chat FROM pitanja_o_radu").all<{ chat: Chat }>();
   for (const { chat } of results) {
     await zavrsiIsteklo(env, chat);
-    await pokreniSljedece(env, chat);
+    await pokreniSljedece(env, chat, Date.now() - CEKANJE_PRVE_PORUKE_MS);
   }
 }
 
@@ -675,9 +698,9 @@ async function cron(env: Env): Promise<void> {
 }
 
 export default {
-  async fetch(zahtjev, env) {
+  async fetch(zahtjev, env, kontekst) {
     const { pathname } = new URL(zahtjev.url);
-    if (zahtjev.method === "POST" && pathname === "/telegram") return telegram(zahtjev, env);
+    if (zahtjev.method === "POST" && pathname === "/telegram") return telegram(zahtjev, env, kontekst);
     if (zahtjev.method === "POST" && pathname === "/actions/rezultat") return rezultat(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/provjera") return provjera(zahtjev, env);
     if (zahtjev.method === "POST" && pathname === "/actions/vlasnik") return vlasnik(zahtjev, env);

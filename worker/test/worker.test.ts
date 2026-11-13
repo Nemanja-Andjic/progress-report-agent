@@ -44,6 +44,21 @@ let mentorPada: boolean;
 let githubPada: boolean;
 let dugmad: unknown[];
 let odgovoriNaDugmad: { id: string; tekst?: string }[];
+// Čekanja iz scheduler.wait ne teku sama: test ih pušta kad hoće, a sat Workera pri tom stoji.
+let cekanja: { ms: number; pusti: () => void }[];
+// Posao iz ctx.waitUntil, da test sačeka da se završi.
+let uPozadini: Promise<unknown>[];
+const KONTEKST = {
+  waitUntil: (posao: Promise<unknown>) => void uPozadini.push(posao),
+  passThroughOnException: () => {},
+  props: {},
+} as unknown as ExecutionContext;
+
+// Pusti sva čekanja koja su počela i sačeka posao koji je za njima krenuo.
+async function pustiCekanja(): Promise<void> {
+  for (const cekanje of cekanja.splice(0)) cekanje.pusti();
+  await Promise.all(uPozadini.splice(0));
+}
 
 async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promise<Response> {
   const zahtjev = new Request(ulaz, opcije);
@@ -82,7 +97,7 @@ async function lazniSvijet(ulaz: RequestInfo | URL, opcije?: RequestInit): Promi
 }
 
 function pozovi(zahtjev: Request, env: Partial<Env> = ENV): Promise<Response> {
-  return worker.fetch(zahtjev as Parameters<typeof worker.fetch>[0], env as Env);
+  return worker.fetch(zahtjev as Parameters<typeof worker.fetch>[0], env as Env, KONTEKST);
 }
 
 function telegramZahtjev(tekst: string, chat = CHAT_NEMANJA, tajna: string | null = TAJNA_WEBHOOKA): Request {
@@ -169,6 +184,11 @@ beforeEach(async () => {
   githubPada = false;
   dugmad = [];
   odgovoriNaDugmad = [];
+  cekanja = [];
+  uPozadini = [];
+  vi.spyOn(scheduler, "wait").mockImplementation(
+    (ms: number) => new Promise<void>((pusti) => void cekanja.push({ ms, pusti })),
+  );
   vi.useFakeTimers({ toFake: ["Date"], now: PODNE });
   vi.spyOn(globalThis, "fetch").mockImplementation(lazniSvijet);
 });
@@ -1749,6 +1769,7 @@ describe('"odloži"', () => {
 
   it.each(["odloži malo", "odlo"])("ne prima %j, nego je to pitanje o radu", async (tekst) => {
     await odlozi(tekst);
+    await pustiCekanja();
 
     expect(poruke).toEqual([{ chat: CHAT_NEMANJA, tekst: "Razmišljam, odgovor stiže za minut-dva." }]);
     expect(pokretanjaPitanja).toHaveLength(1);
@@ -2108,7 +2129,14 @@ describe("pitanja o radu", () => {
   const GRESKA_ROK = 'Pitanje o radu sa chata „nemanja" nije dobilo odgovor: odgovor nije stigao u roku od 5 minuta.';
   const GRESKA_GITHUB = 'Pitanje o radu sa chata „nemanja" nije dobilo odgovor: GitHub nije pokrenuo pitanje-o-radu.yml.';
 
-  const pitaj = (tekst: string, chat = CHAT_NEMANJA, env?: Partial<Env>) => pozovi(telegramZahtjev(tekst, chat), env);
+  // Šalje poruku bez puštanja čekanja, kao da sljedeća stiže odmah za njom.
+  const posalji = (tekst: string, chat = CHAT_NEMANJA, env?: Partial<Env>) => pozovi(telegramZahtjev(tekst, chat), env);
+  // Šalje poruku i pusti čekanje, kao da poslije nje 10 sekundi ništa ne stiže.
+  const pitaj = async (tekst: string, chat = CHAT_NEMANJA, env?: Partial<Env>) => {
+    const odgovor = await posalji(tekst, chat, env);
+    await pustiCekanja();
+    return odgovor;
+  };
   const ulazi = (indeks = -1) =>
     (pokretanjaPitanja.at(indeks)?.telo as { inputs: { chat: string; oznaka: string; pitanje: string } }).inputs;
   const pitanja = () => pokretanjaPitanja.map((pokretanje) => (pokretanje.telo as { inputs: { pitanje: string } }).inputs.pitanje);
@@ -2426,6 +2454,101 @@ describe("pitanja o radu", () => {
       expect(await tekstoviUBazi()).toEqual([]);
     });
 
+    describe("čekanje prije prvog pitanja", () => {
+      it("poruke poslate jedna za drugom idu kao jedno pitanje, a potvrdu dobija svaka odmah", async () => {
+        await posalji("Kako");
+        await posalji("radi");
+        await posalji("jutarnja provjera?");
+
+        expect(tekstovi()).toEqual([RAZMISLJAM, RAZMISLJAM, RAZMISLJAM]);
+        expect(pokretanjaPitanja).toEqual([]);
+        expect(cekanja.map((cekanje) => cekanje.ms)).toEqual([10_000]);
+
+        await pustiCekanja();
+
+        expect(pitanja()).toEqual(["Kako\nradi\njutarnja provjera?"]);
+        await javi("odgovor", "Odgovor.");
+        expect(tekstovi()).toEqual([RAZMISLJAM, RAZMISLJAM, RAZMISLJAM, "Odgovor."]);
+        expect(pokretanjaPitanja).toHaveLength(1);
+      });
+
+      it("poruka na prazan red poslije odgovora opet čeka", async () => {
+        await pitaj("Prvo");
+        await javi("odgovor", "Odgovor.");
+
+        await posalji("Drugo");
+        await posalji("Treće");
+        expect(pitanja()).toEqual(["Prvo"]);
+
+        await pustiCekanja();
+        expect(pitanja()).toEqual(["Prvo", "Drugo\nTreće"]);
+      });
+
+      it("poruka koja stigne dok pokretanje traje ne čeka, nego ide odmah poslije javljanja", async () => {
+        await pitaj("Prvo");
+        await posalji("Drugo");
+        expect(cekanja).toEqual([]);
+
+        await javi("odgovor", "Odgovor.");
+        expect(pitanja()).toEqual(["Prvo", "Drugo"]);
+      });
+
+      it("poruke na prazan red u isto vrijeme pokreću jedno pitanje sa svim porukama", async () => {
+        await Promise.all([posalji("A"), posalji("B"), posalji("C")]);
+        expect(tekstovi()).toEqual([RAZMISLJAM, RAZMISLJAM, RAZMISLJAM]);
+
+        await pustiCekanja();
+
+        expect(pokretanjaPitanja).toHaveLength(1);
+        expect(pitanja()[0].split("\n").sort()).toEqual(["A", "B", "C"]);
+      });
+
+      it("cron ne pokreće poruku koja je stigla prije manje od 10 sekundi", async () => {
+        await posalji("Prvo");
+        vi.setSystemTime(new Date(PODNE.getTime() + 9_999));
+        await cron();
+        expect(pokretanjaPitanja).toEqual([]);
+
+        await posalji("Drugo");
+        await pustiCekanja();
+        expect(pitanja()).toEqual(["Prvo\nDrugo"]);
+      });
+
+      it("kad čekanje ne uspije, poruke pokreće sljedeći cron", async () => {
+        vi.mocked(scheduler.wait).mockRejectedValueOnce(new Error("Prekinuto."));
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        await posalji("Prvo");
+        await posalji("Drugo");
+        await pustiCekanja();
+        expect(pokretanjaPitanja).toEqual([]);
+
+        await cronU("2030-05-15T10:05:00Z");
+
+        expect(pitanja()).toEqual(["Prvo\nDrugo"]);
+      });
+
+      it("cron poslije 10 sekundi pokreće poruke, a zakasnjelo čekanje ne pokreće ih ponovo", async () => {
+        await posalji("Prvo");
+        vi.setSystemTime(new Date(PODNE.getTime() + 10_000));
+        await cron();
+        expect(pitanja()).toEqual(["Prvo"]);
+
+        await pustiCekanja();
+        expect(pokretanjaPitanja).toHaveLength(1);
+      });
+
+      it("kad GitHub ne pokrene workflow poslije čekanja, neuspjeh se javi i red je prazan", async () => {
+        githubPada = true;
+        await posalji("Prvo");
+        await posalji("Drugo");
+
+        await pustiCekanja();
+
+        expect(tekstovi()).toEqual([RAZMISLJAM, RAZMISLJAM, NEUSPJEH, GRESKA_GITHUB]);
+        expect(await tekstoviUBazi()).toEqual([]);
+      });
+    });
+
     it("cron ne pokreće ništa dok pokretanje traje", async () => {
       await pitaj("Prvo");
       await pitaj("Drugo");
@@ -2662,6 +2785,20 @@ describe("pitanja o radu", () => {
         await pitajMentor("Šesnaesto");
 
         expect(pitanja().slice(-2)).toEqual(["Četrnaesto", "Petnaesto, prvi dio\nPetnaesto, drugi dio"]);
+        expect(naMentorov()).toEqual([LIMIT]);
+      });
+
+      it("poruke poslate jedna za drugom troše jedno pitanje", async () => {
+        await odgovoreno(14);
+        await posalji("Petnaesto,", CHAT_MENTOR, UKLJUCENA);
+        await posalji("prvi dio,", CHAT_MENTOR, UKLJUCENA);
+        await posalji("drugi dio", CHAT_MENTOR, UKLJUCENA);
+        await pustiCekanja();
+        await javiMentoru("odgovor", "Odgovor 15");
+        poruke = [];
+
+        expect(pitanja().at(-1)).toBe("Petnaesto,\nprvi dio,\ndrugi dio");
+        await pitajMentor("Šesnaesto");
         expect(naMentorov()).toEqual([LIMIT]);
       });
 
